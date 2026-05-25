@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { sql } from "@/lib/db";
+import { agentProcs } from "@/lib/agent-procs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,24 +77,32 @@ function emit(controller: ReadableStreamDefaultController, evt: StageEvent) {
 function runWhitelisted(
   binary: "node" | "python3",
   args: string[],
-): Promise<{ ok: boolean; tail: string }> {
+  registerAs?: string,
+): Promise<{ ok: boolean; tail: string; canceled?: boolean }> {
   return new Promise((resolve) => {
     const proc = spawn(binary, args, {
       cwd: REPO_ROOT,
       env: process.env,
     });
+    if (registerAs) agentProcs().set(registerAs, proc);
     let out = "";
     let err = "";
+    let canceled = false;
     proc.stdout.on("data", (d) => (out += d.toString()));
     proc.stderr.on("data", (d) => (err += d.toString()));
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
+      if (registerAs) agentProcs().delete(registerAs);
       const tail = (out + err)
         .split("\n")
         .filter(Boolean)
         .slice(-1)[0] ?? "";
-      resolve({ ok: code === 0, tail });
+      canceled = signal === "SIGTERM" || signal === "SIGKILL";
+      resolve({ ok: code === 0, tail, canceled });
     });
-    proc.on("error", (e) => resolve({ ok: false, tail: e.message }));
+    proc.on("error", (e) => {
+      if (registerAs) agentProcs().delete(registerAs);
+      resolve({ ok: false, tail: e.message });
+    });
   });
 }
 
@@ -121,15 +130,15 @@ export async function POST(req: NextRequest) {
         {
           key: "ingest",
           name: "Ingest FDIC",
-          run: () => runWhitelisted("node", ["scripts/ingest-state.mjs", state]),
+          run: () => runWhitelisted("node", ["scripts/ingest-state.mjs", state], "ingest"),
         },
         {
           key: "magellan",
           name: "Magellan",
           run: () =>
             runWhitelisted("python3", [
-              "-m", "agents.magellan", "run", "--limit", limitStr,
-            ]),
+              "-m", "agents.magellan", "run", "--state", state, "--limit", limitStr,
+            ], "magellan"),
         },
         {
           key: "atlas",
@@ -137,7 +146,7 @@ export async function POST(req: NextRequest) {
           run: () =>
             runWhitelisted("python3", [
               "-m", "agents.atlas", "run", "--limit", limitStr,
-            ]),
+            ], "atlas"),
         },
         {
           key: "darwin",
@@ -145,7 +154,7 @@ export async function POST(req: NextRequest) {
           run: () =>
             runWhitelisted("python3", [
               "-m", "agents.darwin", "drain", "--limit", limitStr,
-            ]),
+            ], "darwin"),
         },
         {
           key: "knox",
@@ -153,7 +162,7 @@ export async function POST(req: NextRequest) {
           run: () =>
             runWhitelisted("python3", [
               "-m", "agents.knox", "review", "--limit", limitStr,
-            ]),
+            ], "knox"),
         },
       ];
 
