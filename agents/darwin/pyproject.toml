@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "darwin"
+version = "0.1.0"
+description = "Darwin agent: fee classification into the canonical taxonomy for Bank Fee Index"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "James Gilmore", email = "jlgilmore2@gmail.com" }]
+dependencies = [
+    "anthropic>=0.40",
+    "psycopg2-binary>=2.9",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+darwin = "darwin.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["darwin*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
