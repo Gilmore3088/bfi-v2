@@ -58,6 +58,21 @@ export function LiveActivity() {
     return `${Math.floor(ms / 3_600_000)}h`;
   }
 
+  async function cancel(agent: string) {
+    if (!confirm(`Cancel ${agent} run? Process is SIGTERM'd and the agent_runs row marked failed.`)) return;
+    try {
+      const r = await fetch("/api/agents/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent }),
+      });
+      const j = await r.json();
+      if (!r.ok) setError(j.error || `HTTP ${r.status}`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
@@ -104,9 +119,17 @@ export function LiveActivity() {
                         {r.run_id.substring(0, 8)}
                       </span>
                     </div>
-                    <span className="text-xs text-[var(--color-admin-text-muted)]">
-                      running {age(r.started_at)}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-[var(--color-admin-text-muted)]">
+                        running {age(r.started_at)}
+                      </span>
+                      <button
+                        onClick={() => cancel(r.agent)}
+                        className="text-xs px-2 py-0.5 rounded border border-[var(--color-status-err,#ef4444)] text-[var(--color-status-err,#ef4444)] hover:bg-[var(--color-status-err,#ef4444)] hover:text-white"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                   <div className="flex gap-4 text-xs">
                     <span><span className="font-bold text-[var(--color-status-ok,#10b981)] tabular">{r.events_succeeded}</span> hit</span>
