@@ -24,9 +24,9 @@ dev = [
 [project.scripts]
 darwin = "darwin.__main__:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["darwin*"]
+[tool.setuptools]
+packages = ["darwin", "darwin.tests"]
+package-dir = {"darwin" = ".", "darwin.tests" = "tests"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
