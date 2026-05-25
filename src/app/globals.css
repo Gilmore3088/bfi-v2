@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* Admin (cool, Bloomberg-grade) */
+  --color-admin-bg: #0b0d10;
+  --color-admin-surface: #12161b;
+  --color-admin-surface-2: #181d24;
+  --color-admin-border: #232a33;
+  --color-admin-border-strong: #2f3742;
+  --color-admin-text: #e6e9ee;
+  --color-admin-text-muted: #8a93a0;
+  --color-admin-text-dim: #5b6371;
+  --color-admin-accent: #d75a3a;
+  --color-admin-accent-soft: #2a1a14;
+
+  /* Status */
+  --color-status-ok: #4ade80;
+  --color-status-warn: #fbbf24;
+  --color-status-err: #f87171;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+html,
+body {
+  background: var(--color-admin-bg);
+  color: var(--color-admin-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.admin-card {
+  background: var(--color-admin-surface);
+  border: 1px solid var(--color-admin-border);
+  border-radius: 0.5rem;
+  box-shadow: var(--shadow-xs);
+}
+
+.admin-card:hover {
+  box-shadow: var(--shadow-sm);
+}
