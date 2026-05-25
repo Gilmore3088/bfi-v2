@@ -1,0 +1,33 @@
+{# Peer-benchmark template. #}
+# {{ subject.name }} vs. Peers — Benchmark
+
+**Prepared by Hamilton, Bank Fee Index**
+Charter: {{ subject.charter }}{% if subject.state %} · State: {{ subject.state }}{% endif %}
+
+Peer set: {% for p in peers %}{{ p.name }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+---
+
+## Headline verdict
+
+{{ llm_headline }}
+
+## Side-by-side
+
+| Category | {{ subject.name }} | {% for p in peers %}{{ p.name }}{% if not loop.last %} | {% endif %}{% endfor %} |
+|---|---:|{% for p in peers %}---:{% if not loop.last %}|{% endif %}{% endfor %}|
+{% for row in table -%}
+| {{ row.category }} | {% if row.by_institution.get(subject.slug) is not none %}${{ '%.2f'|format(row.by_institution.get(subject.slug)) }}{% else %}—{% endif %} | {% for p in peers %}{% if row.by_institution.get(p.slug) is not none %}${{ '%.2f'|format(row.by_institution.get(p.slug)) }}{% else %}—{% endif %}{% if not loop.last %} | {% endif %}{% endfor %} |
+{% endfor %}
+
+## Deltas that matter
+
+{{ llm_deltas }}
+
+## So what
+
+{{ llm_so_what }}
+
+---
+
+*Bank Fee Index peer-benchmark analysis.*
