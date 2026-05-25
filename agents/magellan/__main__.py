@@ -48,6 +48,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run discovery but write nothing to the DB",
     )
     run_cmd.add_argument(
+        "--state",
+        type=str,
+        default=None,
+        help="Two-letter state code to scope this run (e.g. FL). Default: all states.",
+    )
+    run_cmd.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -80,8 +86,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.command == "run":
+        state = args.state.upper() if args.state else None
+        if state and len(state) != 2:
+            parser.error("--state must be a 2-letter state code (e.g. FL)")
         summary = asyncio.run(
-            run_agent(seed=args.seed, limit=args.limit, dry_run=args.dry_run)
+            run_agent(
+                seed=args.seed,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                state=state,
+            )
         )
         print(
             f"magellan run {summary['run_id']}: "

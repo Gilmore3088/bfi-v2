@@ -517,6 +517,65 @@ export async function getAgentFleetStatus(): Promise<AgentFleetStatus[]> {
   return out;
 }
 
+export type AgentPatternRow = {
+  state_code: string | null;
+  key: string;
+  hit_count: number;
+  miss_count: number;
+  attempts: number;
+  success_rate: number;
+};
+
+/**
+ * Per-state pattern leaderboard for an agent. Drives the knowledge-layer
+ * panel on /admin/agents. Returns up to `topN` patterns per state ordered
+ * by attempts desc, then success_rate desc.
+ */
+export async function getAgentPatternLeaderboard(
+  agent: AgentName,
+  topN: number = 5,
+): Promise<Map<string, AgentPatternRow[]>> {
+  type Row = {
+    state_code: string | null;
+    key: string;
+    hit_count: string;
+    miss_count: string;
+    attempts: string;
+    success_rate: string;
+  };
+  let rows: Row[] = [];
+  try {
+    rows = await sql<Row[]>`
+      SELECT state_code, key, hit_count::text, miss_count::text,
+             attempts::text, success_rate::text
+      FROM v_agent_pattern_success
+      WHERE agent = ${agent}
+        AND state_code IS NOT NULL
+      ORDER BY state_code ASC, attempts DESC, success_rate DESC
+    `;
+  } catch {
+    rows = [];
+  }
+
+  const grouped = new Map<string, AgentPatternRow[]>();
+  for (const r of rows) {
+    const state = r.state_code ?? "??";
+    const list = grouped.get(state) ?? [];
+    if (list.length < topN) {
+      list.push({
+        state_code: r.state_code,
+        key: r.key,
+        hit_count: Number(r.hit_count),
+        miss_count: Number(r.miss_count),
+        attempts: Number(r.attempts),
+        success_rate: Number(r.success_rate),
+      });
+      grouped.set(state, list);
+    }
+  }
+  return grouped;
+}
+
 export type MarketIndexRow = {
   category: string;
   display_name: string;
