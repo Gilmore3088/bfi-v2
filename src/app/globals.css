@@ -3,6 +3,8 @@
 @theme inline {
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-serif: "Newsreader", "Source Serif Pro", "Iowan Old Style",
+    "Apple Garamond", "Baskerville", "Times New Roman", serif;
 
   /* Admin (cool, Bloomberg-grade) */
   --color-admin-bg: #0b0d10;
@@ -15,6 +17,18 @@
   --color-admin-text-dim: #5b6371;
   --color-admin-accent: #d75a3a;
   --color-admin-accent-soft: #2a1a14;
+
+  /* Consumer (warm, FT/editorial) */
+  --color-consumer-bg: #fbf9f4;
+  --color-consumer-surface: #ffffff;
+  --color-consumer-border: #e7e2d6;
+  --color-consumer-border-strong: #c9c1ad;
+  --color-consumer-ink: #181613;
+  --color-consumer-ink-muted: #4a463f;
+  --color-consumer-ink-dim: #7a7468;
+  --color-consumer-accent: #c2462a;
+  --color-consumer-accent-soft: #f5e3dc;
+  --color-consumer-rule: #1a1714;
 
   /* Status */
   --color-status-ok: #4ade80;
@@ -36,6 +50,24 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* When the consumer surface mounts, flip the page palette to warm. */
+html:has(body > .bfi-consumer),
+body:has(> .bfi-consumer) {
+  background: var(--color-consumer-bg);
+  color: var(--color-consumer-ink);
+}
+
+.bfi-consumer {
+  background: var(--color-consumer-bg);
+  color: var(--color-consumer-ink);
+}
+
+.bfi-consumer .serif {
+  font-family: var(--font-serif);
+  font-feature-settings: "ss01", "kern", "liga";
+  letter-spacing: -0.005em;
+}
+
 .tabular {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
@@ -50,4 +82,14 @@ body {
 
 .admin-card:hover {
   box-shadow: var(--shadow-sm);
+}
+
+.consumer-card {
+  background: var(--color-consumer-surface);
+  border: 1px solid var(--color-consumer-border);
+  border-radius: 0.25rem;
+}
+
+.consumer-rule {
+  border-top: 1px solid var(--color-consumer-rule);
 }
