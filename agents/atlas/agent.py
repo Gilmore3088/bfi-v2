@@ -76,7 +76,7 @@ INSERT INTO fees_raw (
     extractor_version, content_hash
 )
 VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
-ON CONFLICT (institution_id, content_hash) DO NOTHING
+ON CONFLICT (institution_id, content_hash) WHERE content_hash IS NOT NULL DO NOTHING
 RETURNING id
 """
 

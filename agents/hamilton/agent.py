@@ -224,11 +224,21 @@ def _call_anthropic(
     )
     text = "".join(
         block.text for block in msg.content if getattr(block, "type", None) == "text"
-    )
+    ).strip()
+    # Strip code fences if model wrapped JSON despite instructions
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
+        if text.startswith("json"):
+            text = text[4:].lstrip()
     try:
         sections = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"hamilton: model did not return JSON: {exc}") from exc
+        raise RuntimeError(
+            f"hamilton: model did not return JSON: {exc}; first 200 chars: {text[:200]!r}"
+        ) from exc
     for key in expected_keys:
         if key not in sections:
             raise RuntimeError(f"hamilton: model output missing key {key!r}")
@@ -290,16 +300,23 @@ def _persist(
     )
 
     with psycopg2.connect(db_url) as conn, conn.cursor() as cur:
+        # agent_runs FK ancestor for agent_events
+        cur.execute(
+            "INSERT INTO agent_runs (run_id, agent, status, items_processed, cost_cents, "
+            "ended_at, trigger_source) VALUES (%s, 'hamilton', %s, 1, %s, now(), 'manual') "
+            "ON CONFLICT (run_id) DO NOTHING",
+            (str(result.report_id), result.status, result.cost_cents),
+        )
         cur.execute(
             """
             INSERT INTO reports (
-                id, kind, subject_institution_slug, subject_category,
-                status, requested_by, params, output_markdown,
+                id, kind, subject_category,
+                status, params, output_markdown,
                 cost_cents, created_at, completed_at
             )
             VALUES (
-                %s, %s, %s, %s,
-                %s, %s, %s::jsonb, %s,
+                %s, %s, %s,
+                %s, %s::jsonb, %s,
                 %s, now(), now()
             )
             ON CONFLICT (id) DO UPDATE SET
@@ -311,10 +328,8 @@ def _persist(
             (
                 str(result.report_id),
                 request.kind,
-                subject_institution_slug,
                 subject_category,
                 result.status,
-                request.requested_by,
                 params_json,
                 result.body,
                 result.cost_cents,
