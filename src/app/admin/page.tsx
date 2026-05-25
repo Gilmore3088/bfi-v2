@@ -5,20 +5,38 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type Health =
-  | { ok: true; institutions: number; feesVerified: number; latencyMs: number }
+  | { ok: true; institutions: number; feesVerified: number; urls: number; raw: number; latencyMs: number }
   | { ok: false; error: string };
+
+type AgentRun = {
+  agent: string;
+  status: string;
+  items_processed: number;
+  started_at: string;
+  ended_at: string | null;
+};
 
 async function loadHealth(): Promise<Health> {
   const start = Date.now();
   try {
-    const [institutionsRow, feesRow] = await Promise.all([
-      sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM institutions`,
-      sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM fees_verified`,
-    ]);
+    const [row] = await sql<{
+      institutions: string;
+      verified: string;
+      urls: string;
+      raw: string;
+    }[]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM institutions) AS institutions,
+        (SELECT COUNT(*)::text FROM fees_verified) AS verified,
+        (SELECT COUNT(*)::text FROM institution_urls WHERE is_active) AS urls,
+        (SELECT COUNT(*)::text FROM fees_raw) AS raw
+    `;
     return {
       ok: true,
-      institutions: Number(institutionsRow[0]?.count ?? 0),
-      feesVerified: Number(feesRow[0]?.count ?? 0),
+      institutions: Number(row?.institutions ?? 0),
+      feesVerified: Number(row?.verified ?? 0),
+      urls: Number(row?.urls ?? 0),
+      raw: Number(row?.raw ?? 0),
       latencyMs: Date.now() - start,
     };
   } catch (err) {
@@ -26,8 +44,23 @@ async function loadHealth(): Promise<Health> {
   }
 }
 
+async function loadRecentRuns(): Promise<AgentRun[]> {
+  try {
+    const rows = await sql<AgentRun[]>`
+      SELECT agent, status, items_processed,
+             started_at::text AS started_at,
+             ended_at::text AS ended_at
+      FROM agent_runs ORDER BY started_at DESC LIMIT 8
+    `;
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 export default async function AdminDashboard() {
   const health = await loadHealth();
+  const runs = await loadRecentRuns();
 
   return (
     <main className="px-8 py-6 max-w-6xl">
@@ -77,15 +110,68 @@ export default async function AdminDashboard() {
         </section>
       )}
 
+      {health.ok && (
+        <section className="admin-card p-5 mb-4">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-3">
+            Pipeline depth
+          </div>
+          <div className="grid grid-cols-4 gap-4 text-sm">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">Institutions</div>
+              <div className="text-lg font-bold tabular">{formatCount(health.institutions)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">Discovered URLs</div>
+              <div className="text-lg font-bold tabular">{formatCount(health.urls)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">Raw schedules</div>
+              <div className="text-lg font-bold tabular">{formatCount(health.raw)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">Verified fees</div>
+              <div className="text-lg font-bold tabular">{formatCount(health.feesVerified)}</div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="admin-card p-5">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-2">
-          Next up
+        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-3">
+          Recent agent runs
         </div>
-        <ul className="text-sm space-y-1.5 text-[var(--color-admin-text-muted)]">
-          <li>· Wire Market page against fees_verified + taxonomy</li>
-          <li>· Stand up Magellan + Atlas on the 22 seed institutions</li>
-          <li>· First Hamilton report against verified data</li>
-        </ul>
+        {runs.length === 0 ? (
+          <div className="text-sm text-[var(--color-admin-text-muted)]">
+            No agent activity yet. Run <code className="text-xs">python3 -m agents.magellan run --limit 22</code> from repo root to seed.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)] border-b border-[var(--color-admin-border)]">
+                <th className="py-2">Agent</th>
+                <th className="py-2">Status</th>
+                <th className="py-2 text-right">Processed</th>
+                <th className="py-2">Started</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r, i) => (
+                <tr key={i} className="border-b border-[var(--color-admin-border)]/40 last:border-0">
+                  <td className="py-2 font-medium">{r.agent}</td>
+                  <td className="py-2">
+                    <span className={
+                      r.status === "succeeded" ? "text-[var(--color-status-ok)]" :
+                      r.status === "failed" ? "text-[var(--color-status-err)]" :
+                      "text-[var(--color-admin-text-muted)]"
+                    }>{r.status}</span>
+                  </td>
+                  <td className="py-2 text-right tabular">{r.items_processed}</td>
+                  <td className="py-2 text-[var(--color-admin-text-muted)] font-mono text-xs">{r.started_at.substring(0, 19).replace("T", " ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
     </main>
   );
