@@ -1,4 +1,10 @@
-import { getAgentFleetStatus, AGENT_NAMES, AgentName } from "@/lib/queries";
+import {
+  getAgentFleetStatus,
+  getAgentPatternLeaderboard,
+  AGENT_NAMES,
+  AgentName,
+  AgentPatternRow,
+} from "@/lib/queries";
 import { formatCount, formatPct, timeAgo } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +19,10 @@ const AGENT_DESCRIPTIONS: Record<AgentName, string> = {
 };
 
 export default async function AdminAgentsPage() {
-  const fleet = await getAgentFleetStatus();
+  const [fleet, magellanPatterns] = await Promise.all([
+    getAgentFleetStatus(),
+    getAgentPatternLeaderboard("magellan", 5),
+  ]);
   const filter = "all"; // placeholder for future tab interactivity
   const visible = filter === "all" ? fleet : fleet.filter((f) => f.agent === filter);
 
@@ -101,7 +110,65 @@ export default async function AdminAgentsPage() {
           </tbody>
         </table>
       </div>
+
+      <section className="mt-10">
+        <header className="mb-4">
+          <h2 className="text-lg font-bold tracking-tight">
+            Magellan knowledge — per-state pattern leaderboard
+          </h2>
+          <p className="text-xs text-[var(--color-admin-text-muted)] mt-1">
+            Top URL patterns by attempt count for each state. Magellan reorders
+            candidates by these success rates before probing, so each run
+            sharpens the next.
+          </p>
+        </header>
+        {magellanPatterns.size === 0 ? (
+          <EmptyHero
+            title="No state-scoped pattern knowledge yet"
+            body="Run Magellan with --state XX to start accumulating per-state telemetry. Rows appear here after the first probe."
+          />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[...magellanPatterns.entries()]
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([state, rows]) => (
+                <StatePatternCard key={state} state={state} rows={rows} />
+              ))}
+          </div>
+        )}
+      </section>
     </main>
+  );
+}
+
+function StatePatternCard({
+  state,
+  rows,
+}: {
+  state: string;
+  rows: AgentPatternRow[];
+}) {
+  return (
+    <div className="admin-card p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)]">
+          Magellan
+        </div>
+        <div className="text-sm font-bold tabular-nums">{state}</div>
+      </div>
+      <ul className="space-y-2">
+        {rows.map((r) => (
+          <li key={r.key} className="text-xs">
+            <div className="font-mono truncate" title={r.key}>
+              {r.key}
+            </div>
+            <div className="text-[var(--color-admin-text-muted)] tabular-nums">
+              {r.hit_count} / {r.attempts} ({formatPct(r.success_rate)})
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

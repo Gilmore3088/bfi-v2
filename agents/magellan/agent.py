@@ -23,6 +23,11 @@ from typing import Sequence
 import httpx
 
 from .candidates import Candidate, generate_candidates
+from .knowledge import (
+    load_state_patterns,
+    record_pattern_outcome,
+    reorder_candidates_by_knowledge,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -155,9 +160,16 @@ async def discover_for_institution(
     institution_name: str,
     website_url: str,
     institution_id: int | None = None,
+    state_patterns: dict[str, float] | None = None,
 ) -> InstitutionFinding:
-    """Run the full discovery loop for a single institution (no DB writes)."""
+    """Run the full discovery loop for a single institution (no DB writes).
+
+    When state_patterns is provided, candidates are reordered so URLs whose
+    pattern has historically succeeded in this state are probed first.
+    """
     candidates = generate_candidates(website_url)
+    if state_patterns:
+        candidates = reorder_candidates_by_knowledge(candidates, state_patterns)
     if not candidates:
         logger.warning("magellan: no candidates for %s (website=%r)", institution_name, website_url)
         return InstitutionFinding(
@@ -228,30 +240,53 @@ def _ensure_seed_institutions(conn) -> list[dict]:
     return rows
 
 
-def _load_targets(conn, *, seed: bool, limit: int | None) -> list[dict]:
+def _load_targets(
+    conn,
+    *,
+    seed: bool,
+    limit: int | None,
+    state_code: str | None = None,
+) -> list[dict]:
     """Load institutions to probe.
 
     Seed mode: returns the 22 SPEC institutions (inserts if missing).
-    Default: institutions with no active institution_urls row.
+    Default: institutions with no active institution_urls row, optionally
+    filtered by state_code.
     """
     if seed:
-        return _ensure_seed_institutions(conn)
+        rows = _ensure_seed_institutions(conn)
+        # Attach state via lookup so downstream knowledge calls have it.
+        if rows:
+            ids = tuple(r["id"] for r in rows)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, state_code FROM institutions WHERE id = ANY(%s)",
+                    (list(ids),),
+                )
+                state_by_id = {row[0]: row[1] for row in cur.fetchall()}
+            for r in rows:
+                r["state_code"] = state_by_id.get(r["id"])
+        return rows
 
-    sql = """
-        SELECT i.id, i.name, i.website_url
-        FROM institutions i
-        WHERE i.website_url IS NOT NULL
-          AND i.website_url <> ''
-          AND NOT EXISTS (
-            SELECT 1 FROM institution_urls iu
-            WHERE iu.institution_id = i.id AND iu.is_active
-          )
-        ORDER BY i.asset_size DESC NULLS LAST
-    """
+    params: list = []
+    where = [
+        "i.website_url IS NOT NULL",
+        "i.website_url <> ''",
+        "NOT EXISTS (SELECT 1 FROM institution_urls iu "
+        "WHERE iu.institution_id = i.id AND iu.is_active)",
+    ]
+    if state_code:
+        where.append("i.state_code = %s")
+        params.append(state_code)
+    sql = (
+        "SELECT i.id, i.name, i.website_url, i.state_code "
+        "FROM institutions i WHERE " + " AND ".join(where) +
+        " ORDER BY i.asset_size DESC NULLS LAST"
+    )
     if limit:
         sql += f" LIMIT {int(limit)}"
     with conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -302,6 +337,23 @@ def _record_finding(conn, run_id: uuid.UUID, finding: InstitutionFinding) -> Non
     conn.commit()
 
 
+def _record_knowledge(
+    conn,
+    state_code: str | None,
+    finding: InstitutionFinding,
+) -> None:
+    """Write per-state hit/miss outcomes for every probed pattern."""
+    best_pattern = finding.best.candidate.pattern if finding.found and finding.best else None
+    for probe in finding.probes:
+        record_pattern_outcome(
+            conn,
+            state_code=state_code,
+            pattern=probe.candidate.pattern,
+            hit=(probe.candidate.pattern == best_pattern),
+        )
+    conn.commit()
+
+
 def _json_dumps(payload: dict) -> str:
     import json
     return json.dumps(payload, default=str)
@@ -312,6 +364,7 @@ async def run(
     seed: bool = False,
     limit: int | None = None,
     dry_run: bool = False,
+    state: str | None = None,
 ) -> dict:
     """Top-level entrypoint. Returns a summary dict.
 
@@ -345,28 +398,47 @@ async def run(
         # Create agent_runs row so FK from agent_events resolves
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
-                "VALUES (%s, 'magellan', 'in_progress', 'manual')",
-                (str(run_id),),
+                "INSERT INTO agent_runs (run_id, agent, status, "
+                "trigger_source, target_state) "
+                "VALUES (%s, 'magellan', 'in_progress', 'manual', %s)",
+                (str(run_id), state),
             )
         conn.commit()
-        targets = _load_targets(conn, seed=seed, limit=limit)
-        logger.info("magellan: loaded %d targets from DB", len(targets))
+        targets = _load_targets(conn, seed=seed, limit=limit, state_code=state)
+        logger.info(
+            "magellan: loaded %d targets from DB (state=%s)",
+            len(targets),
+            state or "ALL",
+        )
 
     if limit and not seed:
         targets = targets[:limit]
+
+    # Cache loaded state-pattern knowledge so we hit DB once per state.
+    state_pattern_cache: dict[str, dict[str, float]] = {}
 
     found = 0
     processed = 0
     for target in targets:
         try:
+            target_state = target.get("state_code") or state
+            state_patterns: dict[str, float] | None = None
+            if use_db and target_state:
+                if target_state not in state_pattern_cache:
+                    state_pattern_cache[target_state] = load_state_patterns(
+                        conn, target_state
+                    )
+                state_patterns = state_pattern_cache[target_state]
+
             finding = await discover_for_institution(
                 institution_name=target["name"],
                 website_url=target.get("website_url") or "",
                 institution_id=target.get("id"),
+                state_patterns=state_patterns,
             )
             if use_db:
                 _record_finding(conn, run_id, finding)
+                _record_knowledge(conn, target_state, finding)
             else:
                 if finding.found:
                     logger.info(
