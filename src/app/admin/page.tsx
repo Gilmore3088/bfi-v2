@@ -12,7 +12,7 @@ async function loadHealth(): Promise<Health> {
   const start = Date.now();
   try {
     const [institutionsRow, feesRow] = await Promise.all([
-      sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM crawl_targets`,
+      sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM institutions`,
       sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM fees_verified`,
     ]);
     return {
@@ -47,7 +47,7 @@ export default async function AdminDashboard() {
           <StatCard
             label="Institutions"
             value={formatCount(health.institutions)}
-            sub="crawl_targets"
+            sub="v3 staging"
           />
           <StatCard
             label="Verified fees"
