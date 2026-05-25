@@ -68,22 +68,21 @@ const FED_DISTRICT = {
 // FDIC banks (HQ'd OR with at least one branch in state)
 // -----------------------------------------------------------------------------
 
-async function fetchFdicBranchCerts(stateCode) {
-  // Get all unique CERTs that have at least one branch in the state
-  const url = new URL("https://api.fdic.gov/banks/locations");
-  url.searchParams.set("filters", `STALP:${stateCode}`);
-  url.searchParams.set("fields", "CERT");
+async function fetchFdicHqBanks(stateCode) {
+  // HQ-domiciled banks only. Service-area presence (branches in other states)
+  // is tracked separately and does NOT create a new institutions row.
+  const url = new URL("https://api.fdic.gov/banks/institutions");
+  url.searchParams.set("filters", `STALP:${stateCode} AND ACTIVE:1`);
+  url.searchParams.set(
+    "fields",
+    "NAME,CITY,STALP,ASSET,CERT,FED_RSSD,WEBADDR,RSSDHCR",
+  );
   url.searchParams.set("limit", "10000");
 
   const resp = await fetch(url, { redirect: "follow" });
-  if (!resp.ok) throw new Error(`FDIC locations ${resp.status}`);
+  if (!resp.ok) throw new Error(`FDIC institutions ${resp.status}`);
   const data = await resp.json();
-  const certs = new Set();
-  for (const row of data.data || []) {
-    const c = row.data?.CERT;
-    if (c) certs.add(String(c));
-  }
-  return [...certs];
+  return (data.data || []).map(r => r.data);
 }
 
 async function fetchFdicInstitutions(certs) {
@@ -267,11 +266,9 @@ async function main() {
   let cuInserted = 0;
 
   if (!skipBanks) {
-    console.log(`Fetching FDIC unique parent banks for ${state}...`);
-    const certs = await fetchFdicBranchCerts(state);
-    console.log(`  ${certs.length} unique CERTs have FL branches`);
-    const banks = await fetchFdicInstitutions(certs);
-    console.log(`  ${banks.length} active institution records returned`);
+    console.log(`Fetching FDIC HQ-domiciled banks for ${state}...`);
+    const banks = await fetchFdicHqBanks(state);
+    console.log(`  ${banks.length} active banks HQ'd in ${state}`);
     bankInserted = await insertBanks(banks, state);
     console.log(`  Inserted (new only): ${bankInserted}`);
   }
