@@ -342,6 +342,14 @@ async def run(
             return {"run_id": str(run_id), "processed": 0, "found": 0, "mode": "stub"}
     else:
         conn = psycopg2.connect(db_url)
+        # Create agent_runs row so FK from agent_events resolves
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
+                "VALUES (%s, 'magellan', 'in_progress', 'manual')",
+                (str(run_id),),
+            )
+        conn.commit()
         targets = _load_targets(conn, seed=seed, limit=limit)
         logger.info("magellan: loaded %d targets from DB", len(targets))
 
@@ -393,6 +401,13 @@ async def run(
                 conn.commit()
 
     if use_db:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agent_runs SET status='succeeded', ended_at=now(), "
+                "items_processed=%s WHERE run_id=%s",
+                (processed, str(run_id)),
+            )
+        conn.commit()
         conn.close()
 
     summary = {

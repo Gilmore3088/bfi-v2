@@ -159,10 +159,11 @@ def load_category_fees(category: str) -> list[FeeRow]:
         try:
             cur.execute(
                 """
-                SELECT i.slug, i.name, fv.canonical_category, fv.amount, fv.extracted_at::text
+                SELECT LOWER(REGEXP_REPLACE(i.name, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+                       i.name, fv.fee_category, fv.amount, fv.created_at::text
                 FROM fees_verified fv
                 JOIN institutions i ON i.id = fv.institution_id
-                WHERE fv.canonical_category = %s
+                WHERE fv.fee_category = %s
                   AND fv.review_status IN ('approved', 'auto_approved')
                   AND fv.superseded_by IS NULL
                 ORDER BY fv.amount

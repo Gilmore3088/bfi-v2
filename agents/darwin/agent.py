@@ -372,6 +372,15 @@ def drain(
 
     conn = psycopg2.connect(db_url)
     try:
+        # Insert agent_runs row first so agent_events FK resolves
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
+                "VALUES (%s, 'darwin', 'in_progress', 'manual') ON CONFLICT (run_id) DO NOTHING",
+                (str(run_id),),
+            )
+        conn.commit()
+
         rows = _load_pending_rows(conn, batch_limit)
         logger.info("darwin: loaded %d rows to classify", len(rows))
 
@@ -400,18 +409,15 @@ def drain(
                 )
                 conn.commit()
 
-        # Run-level rollup row.
+        # Update run-level rollup
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO agent_runs (run_id, agent, started_at, ended_at, status, items_processed)
-                VALUES (%s, 'darwin', now(), now(), %s, %s)
-                ON CONFLICT (run_id) DO NOTHING
-                """,
+                "UPDATE agent_runs SET ended_at=now(), status=%s, items_processed=%s "
+                "WHERE run_id=%s",
                 (
-                    str(run_id),
                     "succeeded" if counts["errors"] == 0 else "failed",
                     len(rows),
+                    str(run_id),
                 ),
             )
         conn.commit()
