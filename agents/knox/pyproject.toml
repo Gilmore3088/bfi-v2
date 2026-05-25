@@ -1,0 +1,27 @@
+[project]
+name = "knox"
+version = "0.1.0"
+description = "Adversarial reviewer agent for Bank Fee Index v2"
+requires-python = ">=3.12"
+dependencies = [
+  "psycopg2-binary>=2.9",
+  "pydantic>=2.0",
+  "python-dotenv>=1.0",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+knox = "knox.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["knox", "knox.tests"]
+package-dir = {"knox" = ".", "knox.tests" = "tests"}
