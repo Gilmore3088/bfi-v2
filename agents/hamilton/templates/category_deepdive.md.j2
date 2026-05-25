@@ -1,0 +1,41 @@
+{# Category deep-dive template. #}
+# {{ category|replace('_', ' ')|title }} — Category Deep-Dive
+
+**Prepared by Hamilton, Bank Fee Index**
+
+---
+
+## Headline
+
+{{ llm_headline }}
+
+## Distribution
+
+| Statistic | Value |
+|---|---:|
+| Institutions in sample | {{ distribution.count }} |
+| Median | {% if distribution.median is not none %}${{ '%.2f'|format(distribution.median) }}{% else %}—{% endif %} |
+| P25 | {% if distribution.p25 is not none %}${{ '%.2f'|format(distribution.p25) }}{% else %}—{% endif %} |
+| P75 | {% if distribution.p75 is not none %}${{ '%.2f'|format(distribution.p75) }}{% else %}—{% endif %} |
+| Min | {% if distribution.min is not none %}${{ '%.2f'|format(distribution.min) }}{% else %}—{% endif %} |
+| Max | {% if distribution.max is not none %}${{ '%.2f'|format(distribution.max) }}{% else %}—{% endif %} |
+
+## Outliers and notable cases
+
+{{ llm_outliers }}
+
+## Implication
+
+{{ llm_implication }}
+
+## Roster
+
+| Institution | Amount | Extracted |
+|---|---:|---|
+{% for row in rows -%}
+| {{ row.institution_name }} | ${{ '%.2f'|format(row.amount) }} | {{ row.extracted_at or '—' }} |
+{% endfor %}
+
+---
+
+*Bank Fee Index analysis. Every figure traces to a verified fee row.*

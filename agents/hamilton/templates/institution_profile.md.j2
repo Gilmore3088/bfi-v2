@@ -1,0 +1,34 @@
+{# Institution-profile template. Deterministic skeleton + LLM-filled body. #}
+# {{ institution.name }} — Fee Profile
+
+**Prepared by Hamilton, Bank Fee Index**
+Charter: {{ institution.charter }}{% if institution.state %} · State: {{ institution.state }}{% endif %}{% if institution.asset_tier %} · Asset tier: {{ institution.asset_tier }}{% endif %}
+
+---
+
+## Headline
+
+{{ llm_headline }}
+
+## Where {{ institution.name }} sits
+
+{{ llm_positioning }}
+
+## Fee detail
+
+| Category | {{ institution.name }} | Peer median | Peer P25 / P75 |
+|---|---:|---:|---:|
+{% for fee in fees -%}
+{% set peer = peers.get(fee.category, {}) -%}
+{% set dist = peer.get('distribution', {}) -%}
+| {{ fee.category }} | ${{ '%.2f'|format(fee.amount) }} | {% if dist.median is not none %}${{ '%.2f'|format(dist.median) }}{% else %}—{% endif %} | {% if dist.p25 is not none and dist.p75 is not none %}${{ '%.2f'|format(dist.p25) }} / ${{ '%.2f'|format(dist.p75) }}{% else %}—{% endif %} |
+{% endfor %}
+
+## So what
+
+{{ llm_so_what }}
+
+---
+
+*Data freshness: claims trace to `fees_verified` rows extracted on or before
+the date in the table above. Methodology: bankfeeindex.com/methodology.*
