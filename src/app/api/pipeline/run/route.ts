@@ -1,11 +1,61 @@
 import { NextRequest } from "next/server";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { sql } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const REPO_ROOT = path.resolve(process.cwd());
+
+async function summarizeStage(stage: string, state: string): Promise<string> {
+  try {
+    switch (stage) {
+      case "ingest": {
+        const [r] = await sql<{ banks: string; cus: string }[]>`
+          SELECT
+            COUNT(*) FILTER (WHERE charter_type='bank')::text AS banks,
+            COUNT(*) FILTER (WHERE charter_type='credit_union')::text AS cus
+          FROM institutions WHERE state_code=${state}
+        `;
+        return `${r.banks} banks · ${r.cus} CUs in ${state}`;
+      }
+      case "magellan": {
+        const [r] = await sql<{ urls: string }[]>`
+          SELECT COUNT(*)::text AS urls FROM institution_urls
+          WHERE is_active AND institution_id IN (SELECT id FROM institutions WHERE state_code=${state})
+        `;
+        return `${r.urls} active fee URLs found`;
+      }
+      case "atlas": {
+        const [r] = await sql<{ raw: string }[]>`
+          SELECT COUNT(*)::text AS raw FROM fees_raw
+          WHERE institution_id IN (SELECT id FROM institutions WHERE state_code=${state})
+        `;
+        return `${r.raw} raw schedules stored`;
+      }
+      case "darwin": {
+        const [r] = await sql<{ verified: string; approved: string }[]>`
+          SELECT
+            COUNT(*)::text AS verified,
+            COUNT(*) FILTER (WHERE review_status='auto_approved')::text AS approved
+          FROM fees_verified
+          WHERE institution_id IN (SELECT id FROM institutions WHERE state_code=${state})
+        `;
+        return `${r.verified} verified · ${r.approved} auto-approved`;
+      }
+      case "knox": {
+        const [r] = await sql<{ events: string }[]>`
+          SELECT COUNT(*)::text AS events FROM agent_events WHERE agent='knox'
+        `;
+        return `${r.events} review events emitted`;
+      }
+    }
+  } catch (e) {
+    return e instanceof Error ? e.message : "summary unavailable";
+  }
+  return "";
+}
 const ALLOWED_STATES = new Set([
   "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
   "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
@@ -64,14 +114,17 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const stages: Array<{
+        key: "ingest" | "magellan" | "atlas" | "darwin" | "knox";
         name: string;
         run: () => Promise<{ ok: boolean; tail: string }>;
       }> = [
         {
+          key: "ingest",
           name: "Ingest FDIC",
           run: () => runWhitelisted("node", ["scripts/ingest-state.mjs", state]),
         },
         {
+          key: "magellan",
           name: "Magellan",
           run: () =>
             runWhitelisted("python3", [
@@ -79,6 +132,7 @@ export async function POST(req: NextRequest) {
             ]),
         },
         {
+          key: "atlas",
           name: "Atlas",
           run: () =>
             runWhitelisted("python3", [
@@ -86,6 +140,7 @@ export async function POST(req: NextRequest) {
             ]),
         },
         {
+          key: "darwin",
           name: "Darwin",
           run: () =>
             runWhitelisted("python3", [
@@ -93,6 +148,7 @@ export async function POST(req: NextRequest) {
             ]),
         },
         {
+          key: "knox",
           name: "Knox",
           run: () =>
             runWhitelisted("python3", [
@@ -104,10 +160,13 @@ export async function POST(req: NextRequest) {
       for (let i = 0; i < stages.length; i++) {
         emit(controller, { index: i, status: "running", detail: stages[i].name });
         const result = await stages[i].run();
+        const summary = result.ok
+          ? await summarizeStage(stages[i].key, state)
+          : result.tail.substring(0, 140);
         emit(controller, {
           index: i,
           status: result.ok ? "ok" : "fail",
-          detail: result.tail.substring(0, 140),
+          detail: summary,
         });
         if (!result.ok) break;
       }
