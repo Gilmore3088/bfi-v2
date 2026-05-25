@@ -66,7 +66,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = agent.run(limit=args.limit, seed=args.seed)
         print(json.dumps(result.as_dict(), indent=2))
-        return 0 if result.failed == 0 else 1
+        # Partial success is success: only fail if NOTHING worked.
+        # This lets the pipeline continue downstream when some URLs are dead
+        # (which is normal for stale Magellan finds).
+        if result.targets == 0:
+            return 0  # nothing to do
+        return 1 if result.stored == 0 and result.skipped == 0 else 0
 
     return 2
 
