@@ -170,7 +170,7 @@ async function main() {
     const result = await sql`
       INSERT INTO institutions (name, state_code, charter_type, asset_size_tier, fed_district)
       VALUES (${inst.name}, ${inst.state_code}, ${inst.charter_type}, ${inst.asset_size_tier}, ${inst.fed_district})
-      ON CONFLICT DO NOTHING
+      ON CONFLICT (name, state_code) DO NOTHING
       RETURNING id
     `;
     if (result.length > 0) instCount++;
