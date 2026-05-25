@@ -39,6 +39,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run classification but write nothing to the DB",
     )
     drain_cmd.add_argument(
+        "--state",
+        type=str,
+        default=None,
+        help="Two-letter state code; scope drain to institutions in that state",
+    )
+    drain_cmd.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -70,14 +76,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.command == "drain":
-        summary = drain(limit=args.limit, dry_run=args.dry_run)
+        state = (args.state or "").upper() or None
+        summary = drain(limit=args.limit, dry_run=args.dry_run, state=state)
         print(
             f"darwin drain {summary['run_id']}: "
             f"processed={summary['processed']} "
-            f"auto_approved={summary.get('auto_approved', 0)} "
-            f"pending={summary.get('pending', 0)} "
-            f"flagged_taxonomy={summary.get('flagged_taxonomy', 0)} "
+            f"fees_extracted={summary.get('fees_extracted', 0)} "
+            f"fees_auto_approved={summary.get('fees_auto_approved', 0)} "
+            f"fees_pending={summary.get('fees_pending', 0)} "
+            f"empty={summary.get('empty', 0)} "
             f"errors={summary.get('errors', 0)} "
+            f"cost_cents={summary.get('cost_cents', 0)} "
+            f"state={summary.get('state') or 'ALL'} "
             f"mode={summary['mode']}"
         )
         return 0

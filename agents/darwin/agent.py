@@ -20,7 +20,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .classifier import AUTO_PROMOTE_CONFIDENCE, Classification, classify
+from .classifier import (
+    AUTO_PROMOTE_CONFIDENCE,
+    Classification,
+    ExtractionResult,
+    classify,
+    extract_fees,
+)
 from .taxonomy import family_for, is_canonical
 
 
@@ -34,15 +40,25 @@ DEFAULT_LIMIT = 100
 
 @dataclass
 class RowOutcome:
-    """Per-row drain outcome for the run summary."""
+    """Per-row drain outcome for the run summary.
+
+    Multi-fee aware: `fees_extracted` is the number of fees produced from this
+    one fees_raw row, broken down by review_status into `auto_approved` and
+    `pending` counts. `status` is the rollup at the row level.
+    """
 
     fees_raw_id: int
     institution_id: int
     classification: Classification | None
     fees_verified_id: int | None
     superseded_id: int | None
-    status: str  # 'auto_approved' | 'pending' | 'flagged_taxonomy' | 'error'
+    status: str  # 'auto_approved' | 'pending' | 'flagged_taxonomy' | 'empty' | 'error'
     error: str | None = None
+    fees_extracted: int = 0
+    fees_auto_approved: int = 0
+    fees_pending: int = 0
+    fees_superseded: int = 0
+    cost_cents: int = 0
 
 
 # --- DB layer -------------------------------------------------------------
@@ -63,26 +79,39 @@ def _load_psycopg():
         return None
 
 
-def _load_pending_rows(conn, limit: int) -> list[dict]:
+def _load_pending_rows(
+    conn, limit: int, *, state: str | None = None
+) -> list[dict]:
     """Fetch fees_raw rows with no matching fees_verified row.
 
     Ordered oldest-first so the backlog drains FIFO. The LIMIT is honoured
     even in continuous-drain mode so each invocation has a bounded cost.
+    When `state` is given, only rows for institutions in that state are
+    considered.
     """
+    params: list[Any] = []
     sql = """
         SELECT fr.id AS fees_raw_id,
                fr.institution_id,
                fr.raw_text,
                fr.raw_payload
         FROM fees_raw fr
+    """
+    if state:
+        sql += " JOIN institutions i ON i.id = fr.institution_id"
+    sql += """
         WHERE NOT EXISTS (
             SELECT 1 FROM fees_verified fv WHERE fv.fees_raw_id = fr.id
         )
-        ORDER BY fr.extracted_at ASC
-        LIMIT %s
     """
+    if state:
+        sql += " AND i.state_code = %s"
+        params.append(state)
+    sql += " ORDER BY fr.extracted_at ASC LIMIT %s"
+    params.append(limit)
+
     with conn.cursor() as cur:
-        cur.execute(sql, (limit,))
+        cur.execute(sql, tuple(params))
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -217,121 +246,149 @@ def _process_row(
     row: dict,
     *,
     run_id: uuid.UUID,
-    classifier=classify,
+    extractor=extract_fees,
     use_db: bool,
 ) -> RowOutcome:
-    """Classify one fees_raw row and persist the result."""
+    """Extract every fee from one fees_raw row and persist N fees_verified rows.
+
+    Each fee in the document becomes one fees_verified row. Auto-promotion
+    is per-fee (confidence >= AUTO_PROMOTE_CONFIDENCE). Price-change history
+    is tracked per (institution_id, canonical_fee_key) -- the prior live row
+    for that key is superseded by the new row when amounts differ.
+    """
     fees_raw_id = row["fees_raw_id"]
     institution_id = row["institution_id"]
     raw_text = row.get("raw_text") or ""
     raw_payload = row.get("raw_payload")
 
-    classification = classifier(raw_text, raw_payload=raw_payload)
+    result: ExtractionResult = extractor(raw_text, raw_payload=raw_payload)
 
-    if classification.off_taxonomy:
-        # Off-taxonomy: cannot insert into fees_verified (FK to taxonomy
-        # would fail). Record as an agent_event so Knox / a human can
-        # adjudicate without polluting the verified set.
-        logger.warning(
-            "darwin: off-taxonomy classification %r for fees_raw=%s; flagging",
-            classification.fee_category,
-            fees_raw_id,
-        )
+    if not result.fees:
+        # Empty document or extraction error -- record so we don't re-drain it.
         if use_db:
             _emit_event(
                 conn,
                 run_id=run_id,
                 status="skipped",
                 payload={
-                    "reason": "off_taxonomy",
+                    "reason": "no_fees_extracted",
                     "fees_raw_id": fees_raw_id,
                     "institution_id": institution_id,
-                    "predicted_category": classification.fee_category,
-                    "confidence": classification.confidence,
+                    "notes": result.notes,
+                    "cost_cents": result.cost_cents,
+                    "stub_extractor": result.stub,
                 },
             )
             conn.commit()
         return RowOutcome(
             fees_raw_id=fees_raw_id,
             institution_id=institution_id,
-            classification=classification,
+            classification=None,
             fees_verified_id=None,
             superseded_id=None,
-            status="flagged_taxonomy",
+            status="empty",
+            fees_extracted=0,
+            cost_cents=result.cost_cents,
         )
-
-    review_status = "auto_approved" if classification.auto_promote else "pending"
 
     if not use_db:
-        logger.info(
-            "STUB: would insert fees_verified(fees_raw_id=%s, institution_id=%s, "
-            "category=%s, confidence=%.2f, review_status=%s)",
-            fees_raw_id,
-            institution_id,
-            classification.fee_category,
-            classification.confidence,
-            review_status,
-        )
+        for fee in result.fees:
+            logger.info(
+                "STUB: would insert fees_verified(category=%s, amount=%s, "
+                "confidence=%.2f)",
+                fee.fee_category,
+                fee.amount,
+                fee.confidence,
+            )
         return RowOutcome(
             fees_raw_id=fees_raw_id,
             institution_id=institution_id,
-            classification=classification,
+            classification=result.fees[0],
             fees_verified_id=None,
             superseded_id=None,
-            status=review_status,
+            status="auto_approved" if result.fees[0].auto_promote else "pending",
+            fees_extracted=len(result.fees),
+            fees_auto_approved=sum(1 for f in result.fees if f.auto_promote),
+            fees_pending=sum(1 for f in result.fees if not f.auto_promote),
+            cost_cents=result.cost_cents,
         )
 
-    # Price-change-history: find the live row for this (institution, key).
-    # If amount changed, we will supersede the old row after inserting the
-    # new one. Both writes happen in a single transaction.
-    canonical_key = classification.fee_category
-    live = _find_live_row(
-        conn, institution_id=institution_id, canonical_fee_key=canonical_key
-    )
+    auto_count = 0
+    pending_count = 0
+    superseded_count = 0
+    last_id: int | None = None
+    last_classification: Classification | None = None
 
-    new_id = _insert_verified(
-        conn,
-        fees_raw_id=fees_raw_id,
-        institution_id=institution_id,
-        classification=classification,
-        review_status=review_status,
-    )
-    superseded_id: int | None = None
-    if live and _amounts_differ(live["amount"], classification.amount):
-        _supersede(conn, old_id=live["id"], new_id=new_id)
-        superseded_id = live["id"]
-        logger.info(
-            "darwin: price change for institution=%s key=%s old=%s new=%s",
-            institution_id,
-            canonical_key,
-            live["amount"],
-            classification.amount,
+    # Per-doc: collapse duplicates by canonical key (Claude may emit a tier
+    # variant under the same category). Keep the highest-confidence one.
+    deduped: dict[str, Classification] = {}
+    for fee in result.fees:
+        existing = deduped.get(fee.fee_category)
+        if existing is None or fee.confidence > existing.confidence:
+            deduped[fee.fee_category] = fee
+
+    for fee in deduped.values():
+        review_status = "auto_approved" if fee.auto_promote else "pending"
+        canonical_key = fee.fee_category
+        live = _find_live_row(
+            conn,
+            institution_id=institution_id,
+            canonical_fee_key=canonical_key,
         )
+        new_id = _insert_verified(
+            conn,
+            fees_raw_id=fees_raw_id,
+            institution_id=institution_id,
+            classification=fee,
+            review_status=review_status,
+        )
+        superseded_id: int | None = None
+        if live and _amounts_differ(live["amount"], fee.amount):
+            _supersede(conn, old_id=live["id"], new_id=new_id)
+            superseded_id = live["id"]
+            superseded_count += 1
 
-    _emit_event(
-        conn,
-        run_id=run_id,
-        status="succeeded",
-        payload={
-            "fees_raw_id": fees_raw_id,
-            "fees_verified_id": new_id,
-            "institution_id": institution_id,
-            "category": classification.fee_category,
-            "confidence": classification.confidence,
-            "review_status": review_status,
-            "superseded_id": superseded_id,
-            "stub_classifier": classification.stub,
-        },
-    )
+        if review_status == "auto_approved":
+            auto_count += 1
+        else:
+            pending_count += 1
+
+        _emit_event(
+            conn,
+            run_id=run_id,
+            status="succeeded",
+            payload={
+                "fees_raw_id": fees_raw_id,
+                "fees_verified_id": new_id,
+                "institution_id": institution_id,
+                "fee_category": canonical_key,
+                "fee_name": fee.fee_name,
+                "amount": fee.amount,
+                "confidence": fee.confidence,
+                "review_status": review_status,
+                "superseded_id": superseded_id,
+                "evidence_quote": fee.evidence_quote,
+                "stub_extractor": result.stub,
+            },
+        )
+        last_id = new_id
+        last_classification = fee
+
     conn.commit()
 
+    row_status = "auto_approved" if auto_count > 0 and pending_count == 0 else "pending"
     return RowOutcome(
         fees_raw_id=fees_raw_id,
         institution_id=institution_id,
-        classification=classification,
-        fees_verified_id=new_id,
-        superseded_id=superseded_id,
-        status=review_status,
+        classification=last_classification,
+        fees_verified_id=last_id,
+        superseded_id=None,
+        status=row_status,
+        fees_extracted=len(deduped),
+        fees_auto_approved=auto_count,
+        fees_pending=pending_count,
+        fees_superseded=superseded_count,
+        cost_cents=result.cost_cents,
     )
 
 
@@ -339,7 +396,12 @@ def drain(
     *,
     limit: int | None = None,
     dry_run: bool = False,
-    classifier=classify,
+    extractor=extract_fees,
+    state: str | None = None,
+    # `classifier` kept for backwards-compat with old callers (tests / Modal
+    # invocations that still pass classifier=...). Ignored if `extractor` is
+    # provided non-default.
+    classifier=None,
 ) -> dict:
     """Top-level entrypoint: drain a batch of fees_raw rows.
 
@@ -363,10 +425,13 @@ def drain(
         return {
             "run_id": str(run_id),
             "processed": 0,
+            "fees_extracted": 0,
             "auto_approved": 0,
             "pending": 0,
-            "flagged_taxonomy": 0,
+            "empty": 0,
             "errors": 0,
+            "cost_cents": 0,
+            "state": state,
             "mode": "stub",
         }
 
@@ -375,23 +440,37 @@ def drain(
         # Insert agent_runs row first so agent_events FK resolves
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
-                "VALUES (%s, 'darwin', 'in_progress', 'manual') ON CONFLICT (run_id) DO NOTHING",
-                (str(run_id),),
+                "INSERT INTO agent_runs (run_id, agent, status, "
+                "trigger_source, target_state) "
+                "VALUES (%s, 'darwin', 'in_progress', 'manual', %s) "
+                "ON CONFLICT (run_id) DO NOTHING",
+                (str(run_id), state),
             )
         conn.commit()
 
-        rows = _load_pending_rows(conn, batch_limit)
-        logger.info("darwin: loaded %d rows to classify", len(rows))
+        rows = _load_pending_rows(conn, batch_limit, state=state)
+        logger.info(
+            "darwin: loaded %d rows to extract (state=%s)",
+            len(rows),
+            state or "ALL",
+        )
 
-        counts = {"auto_approved": 0, "pending": 0, "flagged_taxonomy": 0, "errors": 0}
+        counts = {"auto_approved": 0, "pending": 0, "empty": 0, "errors": 0}
+        total_fees_extracted = 0
+        total_fees_auto = 0
+        total_fees_pending = 0
+        total_cost_cents = 0
 
         for row in rows:
             try:
                 outcome = _process_row(
-                    conn, row, run_id=run_id, classifier=classifier, use_db=True
+                    conn, row, run_id=run_id, extractor=extractor, use_db=True
                 )
                 counts[outcome.status] = counts.get(outcome.status, 0) + 1
+                total_fees_extracted += outcome.fees_extracted
+                total_fees_auto += outcome.fees_auto_approved
+                total_fees_pending += outcome.fees_pending
+                total_cost_cents += outcome.cost_cents
             except Exception as exc:  # noqa: BLE001 -- isolate per-row failures.
                 conn.rollback()
                 logger.exception(
@@ -412,11 +491,14 @@ def drain(
         # Update run-level rollup
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE agent_runs SET ended_at=now(), status=%s, items_processed=%s "
+                "UPDATE agent_runs SET ended_at=now(), status=%s, "
+                "items_processed=%s, items_failed=%s, cost_cents=%s "
                 "WHERE run_id=%s",
                 (
                     "succeeded" if counts["errors"] == 0 else "failed",
                     len(rows),
+                    counts["errors"],
+                    total_cost_cents,
                     str(run_id),
                 ),
             )
@@ -425,7 +507,12 @@ def drain(
         summary = {
             "run_id": str(run_id),
             "processed": len(rows),
+            "fees_extracted": total_fees_extracted,
+            "fees_auto_approved": total_fees_auto,
+            "fees_pending": total_fees_pending,
             **counts,
+            "cost_cents": total_cost_cents,
+            "state": state,
             "mode": "db",
         }
         logger.info("darwin: drain complete %s", summary)
