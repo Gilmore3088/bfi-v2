@@ -1,6 +1,7 @@
 import { sql } from "@/lib/db";
 import { formatCount } from "@/lib/format";
 import { PipelineTriggerForm } from "./trigger-form";
+import { LiveActivity } from "@/components/live-activity";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -158,6 +159,10 @@ export default async function PipelinePage() {
             </div>
           ))}
         </div>
+      </section>
+
+      <section className="admin-card p-5 mb-6">
+        <LiveActivity />
       </section>
 
       <section className="admin-card p-5 mb-6">
