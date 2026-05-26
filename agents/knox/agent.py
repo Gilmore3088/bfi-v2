@@ -142,6 +142,15 @@ def review(
 
     with psycopg2.connect(database_url) as conn:
         conn.set_session(autocommit=False)
+        # Record agent_runs row so the live dashboard reflects this Knox pass
+        with conn.cursor() as setup_cur:
+            setup_cur.execute(
+                "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
+                "VALUES (%s, 'knox', 'in_progress', 'manual') "
+                "ON CONFLICT (run_id) DO NOTHING",
+                (run_id,),
+            )
+        conn.commit()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(COHORT_QUERY)
             cohort_rows = [dict(r) for r in cur.fetchall()]
@@ -182,6 +191,15 @@ def review(
             conn.rollback()
         else:
             conn.commit()
+
+        # Finalize the agent_runs row
+        with conn.cursor() as fin_cur:
+            fin_cur.execute(
+                "UPDATE agent_runs SET status='succeeded', ended_at=now(), "
+                "items_processed=%s WHERE run_id=%s",
+                (summary["rows_examined"], run_id),
+            )
+        conn.commit()
 
     logger.info("knox run %s complete: %s", run_id, summary)
     return summary

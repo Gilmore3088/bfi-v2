@@ -46,6 +46,7 @@ class AtlasResult:
     validation_rejected: int = 0
     validation_breakdown: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    run_id: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -130,33 +131,68 @@ class AtlasAgent:
         limit: int = 50,
         seed: bool = False,
     ) -> AtlasResult:
+        import uuid as _uuid
+        import psycopg2
         result = AtlasResult()
+        run_id = _uuid.uuid4()
+        result.run_id = str(run_id)
 
-        if targets is None:
-            targets = self.seed_targets(limit) if seed else self.fetch_targets(limit)
-        targets = list(targets)
-        result.targets = len(targets)
+        # Record agent_runs row upfront so live dashboards reflect activity.
+        if self.dsn:
+            try:
+                with psycopg2.connect(self.dsn) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO agent_runs (run_id, agent, status, trigger_source) "
+                        "VALUES (%s, 'atlas', 'in_progress', 'manual') "
+                        "ON CONFLICT (run_id) DO NOTHING",
+                        (str(run_id),),
+                    )
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Atlas: failed to insert agent_runs row: %s", exc)
 
-        if not targets:
-            logger.info("Atlas: no targets to crawl")
+        try:
+            if targets is None:
+                targets = self.seed_targets(limit) if seed else self.fetch_targets(limit)
+            targets = list(targets)
+            result.targets = len(targets)
+
+            if not targets:
+                logger.info("Atlas: no targets to crawl")
+                return result
+
+            if not r2_configured():
+                logger.info("Atlas: R2 not configured — running in STUB upload mode")
+
+            sem = asyncio.Semaphore(self.concurrency)
+            async with httpx.AsyncClient(
+                timeout=DEFAULT_TIMEOUT,
+                follow_redirects=True,
+                headers={"User-Agent": self.user_agent},
+            ) as client:
+                async def process(t: CrawlTarget) -> None:
+                    async with sem:
+                        await self._process_target(t, client, result)
+
+                await asyncio.gather(*(process(t) for t in targets), return_exceptions=False)
+
             return result
-
-        if not r2_configured():
-            logger.info("Atlas: R2 not configured — running in STUB upload mode")
-
-        sem = asyncio.Semaphore(self.concurrency)
-        async with httpx.AsyncClient(
-            timeout=DEFAULT_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": self.user_agent},
-        ) as client:
-            async def process(t: CrawlTarget) -> None:
-                async with sem:
-                    await self._process_target(t, client, result)
-
-            await asyncio.gather(*(process(t) for t in targets), return_exceptions=False)
-
-        return result
+        finally:
+            # Finalize the run row regardless of success/failure.
+            if self.dsn:
+                try:
+                    has_failures = result.failed > 0 and result.stored == 0
+                    final_status = "failed" if has_failures and result.targets > 0 else "succeeded"
+                    with psycopg2.connect(self.dsn) as conn, conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE agent_runs SET status=%s, ended_at=now(), "
+                            "items_processed=%s, items_failed=%s "
+                            "WHERE run_id=%s",
+                            (final_status, result.stored, result.failed, str(run_id)),
+                        )
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Atlas: failed to update agent_runs row: %s", exc)
 
     def run(self, **kwargs) -> AtlasResult:
         return asyncio.run(self.run_async(**kwargs))
