@@ -17,63 +17,11 @@ INSTITUTION_REJECT_THRESHOLD = 3
 # Canonical 49-category taxonomy. Kept in sync with TS ``lib/taxonomy.ts``.
 # TODO(knox): load from the ``taxonomy`` table once the baseline migration
 # lands; this list is the M1 placeholder.
-CANONICAL_CATEGORIES: frozenset[str] = frozenset(
-    {
-        # spotlight (6)
-        "monthly_maintenance",
-        "overdraft",
-        "nsf",
-        "atm_non_network",
-        "card_foreign_txn",
-        "wire_domestic_outgoing",
-        # core (9)
-        "wire_international_outgoing",
-        "wire_incoming",
-        "stop_payment",
-        "returned_item",
-        "paper_statement",
-        "minimum_balance",
-        "excessive_withdrawal",
-        "cashiers_check",
-        "money_order",
-        # extended (15)
-        "atm_network",
-        "atm_international",
-        "card_replacement",
-        "card_expedited",
-        "checkbook_order",
-        "deposit_item_returned",
-        "early_account_closure",
-        "inactivity",
-        "legal_process",
-        "dormant_account",
-        "online_bill_pay",
-        "overdraft_transfer",
-        "research_request",
-        "safe_deposit_box",
-        "telephone_transfer",
-        # comprehensive (19)
-        "ach_origination",
-        "ach_return",
-        "cash_handling",
-        "certified_check",
-        "check_image",
-        "coin_counting",
-        "courier",
-        "credit_report",
-        "currency_exchange",
-        "escheatment",
-        "garnishment",
-        "lockbox",
-        "night_deposit",
-        "notary",
-        "overnight_check",
-        "positive_pay",
-        "remote_deposit",
-        "signature_card",
-        "treasury_management",
-    }
-)
+# Single source of truth — pulled from Darwin's canonical list so the two
+# agents can't drift. If Darwin's taxonomy is missing here, that's the bug.
+from agents.darwin.taxonomy import CANONICAL_CATEGORIES as _DARWIN_CANONICAL  # type: ignore
+
+CANONICAL_CATEGORIES: frozenset[str] = frozenset(_DARWIN_CANONICAL)
 
 REQUIRED_FIELDS: tuple[str, ...] = ("amount", "frequency")
 
