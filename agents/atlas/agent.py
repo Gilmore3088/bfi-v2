@@ -19,6 +19,7 @@ import httpx
 from agents.atlas.extractor import extract_text
 from agents.atlas.fetcher import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT, FetchResult, fetch_url
 from agents.atlas.storage import StoredObject, put_object, r2_configured
+from agents.atlas.validator import validate_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class AtlasResult:
     skipped: int = 0
     failed: int = 0
     stub_uploads: int = 0
+    validation_rejected: int = 0
+    validation_breakdown: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -53,6 +56,8 @@ class AtlasResult:
             "skipped": self.skipped,
             "failed": self.failed,
             "stub_uploads": self.stub_uploads,
+            "validation_rejected": self.validation_rejected,
+            "validation_breakdown": dict(self.validation_breakdown),
             "errors": self.errors,
         }
 
@@ -193,6 +198,24 @@ class AtlasAgent:
 
         raw_text = extract_text(fetched.content, fetched.extension)
         payload = self._build_payload(target, fetched, stored)
+
+        validation = validate_text(raw_text, fetched.content_type)
+        payload["validation_reason"] = validation.reason
+        payload["validation_score"] = validation.score
+        if not validation.is_fee_schedule:
+            result.skipped += 1
+            result.validation_rejected += 1
+            result.validation_breakdown[validation.reason] = (
+                result.validation_breakdown.get(validation.reason, 0) + 1
+            )
+            logger.warning(
+                "Atlas: skipping non-fee content institution=%s url=%s reason=%s score=%.2f",
+                target.institution_id,
+                target.url,
+                validation.reason,
+                validation.score,
+            )
+            return
 
         if self.dry_run:
             result.skipped += 1
