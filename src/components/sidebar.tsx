@@ -8,6 +8,7 @@ import {
   Bot,
   FileStack,
   LineChart,
+  Map,
   Sparkles,
   CheckSquare,
   ShieldCheck,
@@ -30,6 +31,7 @@ const GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Data",
     items: [
       { href: "/admin/market", label: "Market", icon: LineChart },
+      { href: "/admin/states", label: "States", icon: Map },
       { href: "/admin/hamilton", label: "Hamilton", icon: Sparkles },
       { href: "/admin/review", label: "Review", icon: CheckSquare },
       { href: "/admin/data-quality", label: "Data Quality", icon: ShieldCheck },
