@@ -1,207 +1,149 @@
 import { sql } from "@/lib/db";
-import { formatCount } from "@/lib/format";
+import { getPipelineStageStats, type AgentName } from "@/lib/queries";
 import { PipelineTriggerForm } from "./trigger-form";
 import { LiveActivity } from "@/components/live-activity";
+import { StageCard } from "@/components/dashboard/stage-card";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type PipelineState = {
-  institutions: number;
-  institutionsWithUrl: number;
-  urlsDiscovered: number;
-  rawFetched: number;
-  feesVerified: number;
-  feesAutoApproved: number;
-  reportsGenerated: number;
-  byState: { state_code: string; count: number }[];
-};
-
-async function loadPipelineState(): Promise<PipelineState> {
-  const [row] = await sql<{
-    institutions: string;
-    with_url: string;
-    discovered: string;
-    raw: string;
-    verified: string;
-    auto: string;
-    reports: string;
-  }[]>`
-    SELECT
-      (SELECT COUNT(*)::text FROM institutions) AS institutions,
-      (SELECT COUNT(*)::text FROM institutions WHERE website_url IS NOT NULL) AS with_url,
-      (SELECT COUNT(*)::text FROM institution_urls WHERE is_active) AS discovered,
-      (SELECT COUNT(*)::text FROM fees_raw) AS raw,
-      (SELECT COUNT(*)::text FROM fees_verified) AS verified,
-      (SELECT COUNT(*)::text FROM fees_verified WHERE review_status='auto_approved') AS auto,
-      (SELECT COUNT(*)::text FROM reports) AS reports
-  `;
-  const byState = await sql<{ state_code: string; count: number }[]>`
-    SELECT state_code, COUNT(*)::int AS count
-    FROM institutions GROUP BY state_code ORDER BY count DESC, state_code LIMIT 15
-  `;
-  return {
-    institutions: Number(row.institutions),
-    institutionsWithUrl: Number(row.with_url),
-    urlsDiscovered: Number(row.discovered),
-    rawFetched: Number(row.raw),
-    feesVerified: Number(row.verified),
-    feesAutoApproved: Number(row.auto),
-    reportsGenerated: Number(row.reports),
-    byState,
-  };
+async function loadInstitutionCount(): Promise<number> {
+  try {
+    const [r] = await sql<{ c: string }[]>`SELECT COUNT(*)::text AS c FROM institutions`;
+    return Number(r?.c ?? 0);
+  } catch {
+    return 0;
+  }
 }
 
-export default async function PipelinePage() {
-  const state = await loadPipelineState();
+const STAGE_META: {
+  agent: AgentName;
+  n: number;
+  title: string;
+  description: string;
+  inputLabel: string;
+  outputLabel: string;
+  writes: string;
+}[] = [
+  {
+    agent: "magellan",
+    n: 1,
+    title: "Magellan · Discover URLs",
+    description: "Searches each institution's website for the fee-schedule landing page or PDF link.",
+    inputLabel: "Institutions with a website",
+    outputLabel: "Active fee URLs",
+    writes: "institution_urls",
+  },
+  {
+    agent: "atlas",
+    n: 2,
+    title: "Atlas · Crawl + Store",
+    description: "Fetches each discovered URL, normalizes HTML/PDF, and stores the raw artifact in R2.",
+    inputLabel: "Discovered URLs",
+    outputLabel: "Raw schedules captured",
+    writes: "fees_raw, R2",
+  },
+  {
+    agent: "darwin",
+    n: 3,
+    title: "Darwin · LLM Classify",
+    description: "Runs Claude on each raw schedule to extract structured fees and confidence scores.",
+    inputLabel: "Raw schedules",
+    outputLabel: "Verified fees",
+    writes: "fees_verified",
+  },
+  {
+    agent: "knox",
+    n: 4,
+    title: "Knox · Adversarial Review",
+    description: "Audits Darwin output, auto-approves high-confidence rows (≥0.90), flags the rest.",
+    inputLabel: "Verified fees",
+    outputLabel: "Auto-approved",
+    writes: "agent_events, fees_verified.review_status",
+  },
+  {
+    agent: "hamilton",
+    n: 5,
+    title: "Hamilton · LLM Analyst",
+    description: "Generates institution/category/peer research reports from approved fee data. On demand.",
+    inputLabel: "Verified fees",
+    outputLabel: "Reports published",
+    writes: "reports",
+  },
+];
 
-  const stages = [
-    {
-      n: 1,
-      agent: "Magellan",
-      role: "URL Discovery",
-      input: { label: "Institutions w/ website", value: state.institutionsWithUrl },
-      output: { label: "Active fee URLs", value: state.urlsDiscovered },
-      cmd: "python3 -m agents.magellan run --limit N",
-      writes: "institution_urls, agent_events",
-    },
-    {
-      n: 2,
-      agent: "Atlas",
-      role: "Crawl + R2",
-      input: { label: "Discovered URLs", value: state.urlsDiscovered },
-      output: { label: "Raw schedules stored", value: state.rawFetched },
-      cmd: "python3 -m agents.atlas run --limit N",
-      writes: "fees_raw, R2 bucket",
-    },
-    {
-      n: 3,
-      agent: "Darwin",
-      role: "LLM Classifier",
-      input: { label: "Raw schedules", value: state.rawFetched },
-      output: { label: "Verified fees", value: state.feesVerified },
-      cmd: "python3 -m agents.darwin drain --limit N",
-      writes: "fees_verified (auto_approved ≥0.90)",
-    },
-    {
-      n: 4,
-      agent: "Knox",
-      role: "Adversarial Review",
-      input: { label: "Verified fees", value: state.feesVerified },
-      output: { label: "Auto-approved", value: state.feesAutoApproved },
-      cmd: "python3 -m agents.knox review --limit N",
-      writes: "agent_events (flag findings)",
-    },
-    {
-      n: 5,
-      agent: "Hamilton",
-      role: "LLM Analyst",
-      input: { label: "Verified fees", value: state.feesVerified },
-      output: { label: "Reports", value: state.reportsGenerated },
-      cmd: "python3 -m agents.hamilton generate --type {institution|category|peer}",
-      writes: "reports (markdown + cost_cents)",
-    },
-  ];
+export default async function PipelinePage() {
+  const [stages, instCount] = await Promise.all([
+    getPipelineStageStats(),
+    loadInstitutionCount(),
+  ]);
+  const statsByAgent = new Map(stages.map((s) => [s.agent, s]));
 
   return (
-    <main className="px-8 py-6 max-w-6xl">
-      <header className="mb-6">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-1">
-          End-to-end pipeline
+    <main className="px-10 py-10 max-w-[1400px] mx-auto space-y-12">
+      <header>
+        <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] font-semibold mb-2">
+          End-to-end tracker
         </div>
-        <h1 className="text-2xl font-bold tracking-tight">Pipeline</h1>
-        <p className="text-sm text-[var(--color-admin-text-muted)] mt-1">
-          Five agents in a directed graph. Each stage reads from the previous stage&apos;s output table.
-          Live counts pulled directly from staging Postgres.
+        <h1 className="text-3xl font-bold tracking-tight">Pipeline</h1>
+        <p className="text-sm text-[var(--color-admin-text-muted)] mt-2 max-w-2xl">
+          Trigger a state-scoped run and watch each stage drain. Every counter is
+          live from staging Postgres.
         </p>
       </header>
 
-      <section className="admin-card p-5 mb-6">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-4">
-          Stage diagram
-        </div>
-        <div className="space-y-3">
-          {stages.map((s, i) => (
-            <div key={s.agent} className="flex items-stretch gap-3">
-              <div className="flex flex-col items-center w-12 flex-shrink-0">
-                <div className="rounded-full w-10 h-10 flex items-center justify-center bg-[var(--color-admin-elev)] border border-[var(--color-admin-border)] text-sm font-bold tabular">
-                  {s.n}
-                </div>
-                {i < stages.length - 1 && (
-                  <div className="w-px flex-1 bg-[var(--color-admin-border)] my-1 min-h-[20px]" />
-                )}
-              </div>
-              <div className="flex-1 admin-card p-4">
-                <div className="flex items-baseline justify-between mb-2">
-                  <div>
-                    <span className="text-base font-bold">{s.agent}</span>
-                    <span className="text-xs text-[var(--color-admin-text-muted)] ml-2">{s.role}</span>
-                  </div>
-                  <code className="text-[10px] text-[var(--color-admin-text-dim)] font-mono">{s.writes}</code>
-                </div>
-                <div className="grid grid-cols-3 gap-3 text-sm">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">In</div>
-                    <div className="font-bold tabular">{formatCount(s.input.value)}</div>
-                    <div className="text-[10px] text-[var(--color-admin-text-muted)]">{s.input.label}</div>
-                  </div>
-                  <div className="text-center self-center text-[var(--color-admin-text-dim)]">→</div>
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)]">Out</div>
-                    <div className="font-bold tabular">{formatCount(s.output.value)}</div>
-                    <div className="text-[10px] text-[var(--color-admin-text-muted)]">{s.output.label}</div>
-                  </div>
-                </div>
-                <div className="mt-3 pt-3 border-t border-[var(--color-admin-border)] text-[10px] font-mono text-[var(--color-admin-text-muted)]">
-                  $ {s.cmd}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="admin-card p-5 mb-6">
-        <LiveActivity />
-      </section>
-
-      <section className="admin-card p-5 mb-6">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-3">
-          Trigger pipeline by state
-        </div>
-        <p className="text-sm text-[var(--color-admin-text-muted)] mb-4">
-          Pick a state. The orchestrator will ingest institutions from FDIC, then run Magellan
-          → Atlas → Darwin → Knox in sequence on that subset. Hamilton runs on demand afterward.
-        </p>
-        <PipelineTriggerForm currentTotals={state} />
-      </section>
-
-      <section className="admin-card p-5">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] mb-3">
-          Institutions by state (top 15)
-        </div>
-        {state.byState.length === 0 ? (
-          <div className="text-sm text-[var(--color-admin-text-muted)]">
-            No institutions seeded. Run the ingest above.
+      <section className="admin-card-lift p-8">
+        <div className="flex items-baseline justify-between mb-2 gap-6">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">Run a state</h2>
+            <p className="text-sm text-[var(--color-admin-text-muted)] mt-1">
+              Ingest from FDIC, then Magellan → Atlas → Darwin → Knox in sequence.
+              Hamilton runs separately after the queue is approved.
+            </p>
           </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)] border-b border-[var(--color-admin-border)]">
-                <th className="py-2">State</th>
-                <th className="py-2 text-right">Institutions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.byState.map((s) => (
-                <tr key={s.state_code} className="border-b border-[var(--color-admin-border)]/40 last:border-0">
-                  <td className="py-2 font-mono">{s.state_code}</td>
-                  <td className="py-2 text-right tabular">{formatCount(s.count)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--color-admin-text-dim)] font-semibold">
+              Roster
+            </div>
+            <div className="text-2xl font-bold tabular mt-1">{instCount.toLocaleString()}</div>
+            <div className="text-[11px] text-[var(--color-admin-text-muted)]">institutions seeded</div>
+          </div>
+        </div>
+        <div className="mt-6">
+          <PipelineTriggerForm currentTotals={{ institutions: instCount }} />
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-lg font-semibold tracking-tight">Stages</h2>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-admin-text-dim)] font-semibold">
+            5 agents · sequential
+          </div>
+        </div>
+        {STAGE_META.map((meta) => {
+          const s = statsByAgent.get(meta.agent);
+          return (
+            <StageCard
+              key={meta.agent}
+              n={meta.n}
+              title={meta.title}
+              description={meta.description}
+              inputLabel={meta.inputLabel}
+              inputValue={s?.inputCount ?? 0}
+              outputLabel={meta.outputLabel}
+              outputValue={s?.outputCount ?? 0}
+              lastRunAt={s?.lastRunAt ?? null}
+              lastStatus={s?.lastStatus ?? null}
+              throughputPerMin={s?.throughputPerMin ?? null}
+              writes={meta.writes}
+            />
+          );
+        })}
+      </section>
+
+      <section className="admin-card-lift p-8">
+        <LiveActivity />
       </section>
     </main>
   );

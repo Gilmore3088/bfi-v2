@@ -886,6 +886,215 @@ export type HamiltonReportRow = {
   completed_at: string | null;
 };
 
+// ---------------------------------------------------------------------------
+// Dashboard helpers
+// ---------------------------------------------------------------------------
+
+export type OpsHeroStats = {
+  institutions: number;
+  urls: number;
+  feesVerified: number;
+  reports: number;
+  institutionsAddedToday: number;
+  urlsAddedToday: number;
+  feesAddedToday: number;
+  reportsAddedToday: number;
+};
+
+/**
+ * Single round-trip for the operations dashboard hero. Each stat includes a
+ * "delta today" companion count so the UI can render a +N indicator.
+ */
+export async function getOpsHeroStats(): Promise<OpsHeroStats> {
+  try {
+    const [r] = await sql<{
+      institutions: string;
+      urls: string;
+      verified: string;
+      reports: string;
+      inst_today: string;
+      urls_today: string;
+      verified_today: string;
+      reports_today: string;
+    }[]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM institutions)                                            AS institutions,
+        (SELECT COUNT(*)::text FROM institution_urls WHERE is_active)                        AS urls,
+        (SELECT COUNT(*)::text FROM fees_verified
+           WHERE superseded_by IS NULL
+             AND review_status IN ('approved','auto_approved'))                              AS verified,
+        (SELECT COUNT(*)::text FROM reports)                                                 AS reports,
+        (SELECT COUNT(*)::text FROM institutions WHERE created_at::date = CURRENT_DATE)      AS inst_today,
+        (SELECT COUNT(*)::text FROM institution_urls
+           WHERE is_active AND created_at::date = CURRENT_DATE)                              AS urls_today,
+        (SELECT COUNT(*)::text FROM fees_verified
+           WHERE created_at::date = CURRENT_DATE
+             AND review_status IN ('approved','auto_approved'))                              AS verified_today,
+        (SELECT COUNT(*)::text FROM reports WHERE created_at::date = CURRENT_DATE)           AS reports_today
+    `;
+    return {
+      institutions: Number(r?.institutions ?? 0),
+      urls: Number(r?.urls ?? 0),
+      feesVerified: Number(r?.verified ?? 0),
+      reports: Number(r?.reports ?? 0),
+      institutionsAddedToday: Number(r?.inst_today ?? 0),
+      urlsAddedToday: Number(r?.urls_today ?? 0),
+      feesAddedToday: Number(r?.verified_today ?? 0),
+      reportsAddedToday: Number(r?.reports_today ?? 0),
+    };
+  } catch {
+    return {
+      institutions: 0, urls: 0, feesVerified: 0, reports: 0,
+      institutionsAddedToday: 0, urlsAddedToday: 0, feesAddedToday: 0, reportsAddedToday: 0,
+    };
+  }
+}
+
+export type PipelineStageStat = {
+  agent: AgentName;
+  inputCount: number;
+  outputCount: number;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  throughputPerMin: number | null;
+};
+
+/**
+ * Per-agent live counts of upstream input and own output, plus last run
+ * status and throughput. Throughput is items_processed / duration_minutes
+ * of the most recent succeeded run.
+ */
+export async function getPipelineStageStats(): Promise<PipelineStageStat[]> {
+  let inputs = { magellan: 0, atlas: 0, darwin: 0, knox: 0, hamilton: 0 };
+  let outputs = { magellan: 0, atlas: 0, darwin: 0, knox: 0, hamilton: 0 };
+  try {
+    const [r] = await sql<{
+      inst_with_url: string;
+      urls_active: string;
+      raw: string;
+      verified: string;
+      auto_approved: string;
+      reports: string;
+    }[]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM institutions WHERE website_url IS NOT NULL) AS inst_with_url,
+        (SELECT COUNT(*)::text FROM institution_urls WHERE is_active)           AS urls_active,
+        (SELECT COUNT(*)::text FROM fees_raw)                                   AS raw,
+        (SELECT COUNT(*)::text FROM fees_verified
+           WHERE superseded_by IS NULL)                                         AS verified,
+        (SELECT COUNT(*)::text FROM fees_verified
+           WHERE superseded_by IS NULL
+             AND review_status = 'auto_approved')                               AS auto_approved,
+        (SELECT COUNT(*)::text FROM reports)                                    AS reports
+    `;
+    inputs = {
+      magellan: Number(r?.inst_with_url ?? 0),
+      atlas: Number(r?.urls_active ?? 0),
+      darwin: Number(r?.raw ?? 0),
+      knox: Number(r?.verified ?? 0),
+      hamilton: Number(r?.verified ?? 0),
+    };
+    outputs = {
+      magellan: Number(r?.urls_active ?? 0),
+      atlas: Number(r?.raw ?? 0),
+      darwin: Number(r?.verified ?? 0),
+      knox: Number(r?.auto_approved ?? 0),
+      hamilton: Number(r?.reports ?? 0),
+    };
+  } catch {
+    /* fall through */
+  }
+
+  type LastRun = {
+    agent: AgentName;
+    started_at: string;
+    ended_at: string | null;
+    status: string;
+    items_processed: string;
+  };
+  let lastRuns: LastRun[] = [];
+  try {
+    lastRuns = await sql<LastRun[]>`
+      SELECT DISTINCT ON (agent)
+        agent, started_at::text AS started_at,
+        ended_at::text AS ended_at, status,
+        items_processed::text AS items_processed
+      FROM agent_runs
+      ORDER BY agent, started_at DESC
+    `;
+  } catch {
+    lastRuns = [];
+  }
+  const byAgent = new Map(lastRuns.map((r) => [r.agent, r]));
+
+  return AGENT_NAMES.map((agent) => {
+    const lr = byAgent.get(agent);
+    let throughput: number | null = null;
+    if (lr?.ended_at && lr.started_at) {
+      const ms = new Date(lr.ended_at).getTime() - new Date(lr.started_at).getTime();
+      const mins = ms / 60_000;
+      const items = Number(lr.items_processed);
+      throughput = mins > 0.01 && items > 0 ? items / mins : null;
+    }
+    return {
+      agent,
+      inputCount: inputs[agent],
+      outputCount: outputs[agent],
+      lastRunAt: lr?.started_at ?? null,
+      lastStatus: lr?.status ?? null,
+      throughputPerMin: throughput,
+    };
+  });
+}
+
+export type TodayMetrics = {
+  costCentsToday: number;
+  docsToday: number;
+  feesToday: number;
+  hitRate: number | null;
+};
+
+/**
+ * Today's operational metrics: spend, docs processed, fees extracted, and
+ * URL hit rate (Magellan succeeded / attempted today).
+ */
+export async function getTodayMetrics(): Promise<TodayMetrics> {
+  try {
+    const [r] = await sql<{
+      cost: string;
+      docs: string;
+      fees: string;
+      hits: string;
+      attempts: string;
+    }[]>`
+      SELECT
+        COALESCE((SELECT SUM(cost_cents)::text FROM reports
+                    WHERE created_at::date = CURRENT_DATE), '0')                     AS cost,
+        (SELECT COUNT(*)::text FROM fees_raw
+            WHERE extracted_at::date = CURRENT_DATE)                                 AS docs,
+        (SELECT COUNT(*)::text FROM fees_verified
+            WHERE created_at::date = CURRENT_DATE)                                   AS fees,
+        (SELECT COUNT(*)::text FROM agent_events
+            WHERE agent='magellan'
+              AND status='succeeded'
+              AND created_at::date = CURRENT_DATE)                                   AS hits,
+        (SELECT COUNT(*)::text FROM agent_events
+            WHERE agent='magellan'
+              AND created_at::date = CURRENT_DATE)                                   AS attempts
+    `;
+    const attempts = Number(r?.attempts ?? 0);
+    const hits = Number(r?.hits ?? 0);
+    return {
+      costCentsToday: Number(r?.cost ?? 0),
+      docsToday: Number(r?.docs ?? 0),
+      feesToday: Number(r?.fees ?? 0),
+      hitRate: attempts > 0 ? hits / attempts : null,
+    };
+  } catch {
+    return { costCentsToday: 0, docsToday: 0, feesToday: 0, hitRate: null };
+  }
+}
+
 export async function getHamiltonReports(limit = 50): Promise<HamiltonReportRow[]> {
   type Row = {
     id: string;
