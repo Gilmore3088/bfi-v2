@@ -319,10 +319,24 @@ def _process_row(
     last_id: int | None = None
     last_classification: Classification | None = None
 
+    # Drop any fee with no usable amount — these are extraction noise.
+    # A fee without an amount is not a fee; persisting it just clutters
+    # fees_verified with rows the reviewer would reject anyway.
+    valid_fees = [
+        f for f in result.fees
+        if f.amount is not None and float(f.amount) > 0
+    ]
+    dropped_no_amount = len(result.fees) - len(valid_fees)
+    if dropped_no_amount:
+        logger.info(
+            "darwin: dropped %d fees with null/zero amount for fees_raw=%s",
+            dropped_no_amount, fees_raw_id,
+        )
+
     # Per-doc: collapse duplicates by canonical key (Claude may emit a tier
     # variant under the same category). Keep the highest-confidence one.
     deduped: dict[str, Classification] = {}
-    for fee in result.fees:
+    for fee in valid_fees:
         existing = deduped.get(fee.fee_category)
         if existing is None or fee.confidence > existing.confidence:
             deduped[fee.fee_category] = fee
