@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Workflow,
@@ -13,9 +14,17 @@ import {
   CheckSquare,
   ShieldCheck,
   Mail,
+  History,
+  Building2,
 } from "lucide-react";
 
-type NavItem = { href: string; label: string; icon: React.ComponentType<{ size?: number; strokeWidth?: number }> };
+type NavItem = {
+  href: string;
+  label: string;
+  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+  /** Optional id this nav item exposes for badge fetching. */
+  badge?: "review-pending";
+};
 
 const GROUPS: { heading: string; items: NavItem[] }[] = [
   {
@@ -24,16 +33,18 @@ const GROUPS: { heading: string; items: NavItem[] }[] = [
       { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
       { href: "/admin/pipeline", label: "Pipeline", icon: Workflow },
       { href: "/admin/agents", label: "Agents", icon: Bot },
+      { href: "/admin/runs", label: "Runs", icon: History },
       { href: "/admin/raw", label: "Raw Docs", icon: FileStack },
     ],
   },
   {
     heading: "Data",
     items: [
+      { href: "/admin/institutions", label: "Institutions", icon: Building2 },
       { href: "/admin/market", label: "Market", icon: LineChart },
       { href: "/admin/states", label: "States", icon: Map },
       { href: "/admin/hamilton", label: "Hamilton", icon: Sparkles },
-      { href: "/admin/review", label: "Review", icon: CheckSquare },
+      { href: "/admin/review", label: "Review", icon: CheckSquare, badge: "review-pending" },
       { href: "/admin/data-quality", label: "Data Quality", icon: ShieldCheck },
     ],
   },
@@ -43,8 +54,29 @@ const GROUPS: { heading: string; items: NavItem[] }[] = [
   },
 ];
 
-export function Sidebar() {
+export function Sidebar(): React.ReactElement {
   const pathname = usePathname();
+  const [reviewPending, setReviewPending] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    async function fetchBadge(): Promise<void> {
+      try {
+        const r = await fetch("/api/review/pending-count", { cache: "no-store" });
+        if (!r.ok) return;
+        const j = (await r.json()) as { pending?: number };
+        if (alive && typeof j.pending === "number") setReviewPending(j.pending);
+      } catch {
+        // ignore
+      }
+    }
+    fetchBadge();
+    const t = setInterval(fetchBadge, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
 
   return (
     <aside className="w-60 shrink-0 border-r border-[var(--color-admin-border)] bg-[var(--color-admin-surface)] min-h-screen flex flex-col">
@@ -77,6 +109,10 @@ export function Sidebar() {
                     ? pathname === "/admin"
                     : pathname.startsWith(item.href);
                 const Icon = item.icon;
+                const badge =
+                  item.badge === "review-pending" && reviewPending && reviewPending > 0
+                    ? reviewPending
+                    : null;
                 return (
                   <Link
                     key={item.href}
@@ -89,7 +125,12 @@ export function Sidebar() {
                     }
                   >
                     <Icon size={16} strokeWidth={1.75} />
-                    <span>{item.label}</span>
+                    <span className="flex-1">{item.label}</span>
+                    {badge != null && (
+                      <span className="text-[10px] tabular-nums px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                        {badge > 99 ? "99+" : badge}
+                      </span>
+                    )}
                   </Link>
                 );
               })}

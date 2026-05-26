@@ -1,6 +1,7 @@
 import { sql } from "@/lib/db";
 import { getPipelineStageStats, type AgentName } from "@/lib/queries";
 import { PipelineTriggerForm } from "./trigger-form";
+import { PipelineQueueBulkForm } from "./queue-bulk-form";
 import { LiveActivity } from "@/components/live-activity";
 import { StageCard } from "@/components/dashboard/stage-card";
 
@@ -111,6 +112,19 @@ export default async function PipelinePage() {
         </div>
         <div className="mt-6">
           <PipelineTriggerForm currentTotals={{ institutions: instCount }} />
+        </div>
+      </section>
+
+      <section className="admin-card-lift p-8">
+        <div className="mb-2">
+          <h2 className="text-lg font-semibold tracking-tight">Queue multiple states</h2>
+          <p className="text-sm text-[var(--color-admin-text-muted)] mt-1">
+            Pick states to drain in sequence. Each state runs ingest → Magellan → Atlas →
+            Darwin → Knox before moving to the next.
+          </p>
+        </div>
+        <div className="mt-6">
+          <PipelineQueueBulkForm />
         </div>
       </section>
 
