@@ -173,11 +173,28 @@ class _FakeCursor:
     def __exit__(self, *_args):
         return False
 
+    @property
+    def description(self):
+        return self._store.get("_next_description")
+
+    def fetchall(self):
+        rows = self._store.get("_next_fetchall") or []
+        self._store["_next_fetchall"] = None
+        self._store["_next_description"] = None
+        return rows
+
     def execute(self, sql: str, params: tuple | None = None) -> None:
         params = params or ()
         sql_lc = " ".join(sql.split()).lower()
         self._store["statements"].append((sql_lc, params))
 
+        if "select id, amount, confidence, created_at from fees_verified" in sql_lc:
+            # Cross-doc dedup query. Default: no competitors.
+            self._store["_next_description"] = [
+                ("id",), ("amount",), ("confidence",), ("created_at",)
+            ]
+            self._store["_next_fetchall"] = self._store.get("_cross_doc_rows", [])
+            return
         if "select id, amount from fees_verified" in sql_lc:
             inst_id, key = params[0], params[1]
             live = self._store["live"].get((inst_id, key))
@@ -235,6 +252,17 @@ class _FakeConn:
         self.rollbacks += 1
 
 
+# Raw text used by _process_row tests. Includes evidence_quote substrings
+# (`<category> $<amount>`) that the per-fee evidence verifier looks for so the
+# test fees can auto-approve under the new evidence-in-source guardrail.
+_RAW_TEXT_WITH_EVIDENCE = (
+    "monthly_maintenance $12.0 "
+    "monthly_maintenance $8.0 "
+    "overdraft $30.0 overdraft $35.0 "
+    "nsf $35.0"
+)
+
+
 def _multi_fee_extractor(fees: list[Classification], cost_cents: int = 12):
     """Build a fake extractor returning the given Classifications."""
 
@@ -269,7 +297,7 @@ def test_process_row_empty_doc_records_skipped_event() -> None:
     extractor = _multi_fee_extractor([], cost_cents=3)
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 1, "institution_id": 100, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 1, "institution_id": 100, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
@@ -291,7 +319,7 @@ def test_process_row_inserts_one_row_per_fee() -> None:
     ])
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 5, "institution_id": 200, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 5, "institution_id": 200, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
@@ -313,7 +341,7 @@ def test_process_row_low_confidence_fees_marked_pending() -> None:
     ])
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 7, "institution_id": 201, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 7, "institution_id": 201, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
@@ -346,7 +374,7 @@ def test_process_row_handles_price_change_via_supersede() -> None:
     extractor = _multi_fee_extractor([_fee("overdraft", 35.0, 0.95)])
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 10, "institution_id": 300, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 10, "institution_id": 300, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
@@ -369,7 +397,7 @@ def test_process_row_deduplicates_same_category_keeps_highest_confidence() -> No
     ])
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 12, "institution_id": 400, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 12, "institution_id": 400, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
@@ -385,7 +413,7 @@ def test_process_row_cost_cents_propagates_to_outcome() -> None:
     extractor = _multi_fee_extractor([_fee("overdraft", 30.0)], cost_cents=42)
     outcome = _process_row(
         conn,
-        {"fees_raw_id": 15, "institution_id": 500, "raw_text": "x", "raw_payload": None},
+        {"fees_raw_id": 15, "institution_id": 500, "raw_text": _RAW_TEXT_WITH_EVIDENCE, "raw_payload": None},
         run_id=uuid.uuid4(),
         extractor=extractor,
         use_db=True,
