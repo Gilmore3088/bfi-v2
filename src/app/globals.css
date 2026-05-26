@@ -93,3 +93,33 @@ body:has(> .bfi-consumer) {
 .consumer-rule {
   border-top: 1px solid var(--color-consumer-rule);
 }
+
+/* Dashboard ergonomics */
+.admin-card-lift {
+  background: var(--color-admin-surface);
+  border: 1px solid var(--color-admin-border);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-xs);
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+.admin-card-lift:hover {
+  border-color: var(--color-admin-border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(74, 222, 128, 0); }
+}
+.pulse-ring-ok {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+@keyframes flow-dash {
+  to { stroke-dashoffset: -16; }
+}
+.flow-arrow path {
+  stroke-dasharray: 4 4;
+  animation: flow-dash 1.4s linear infinite;
+}
+
