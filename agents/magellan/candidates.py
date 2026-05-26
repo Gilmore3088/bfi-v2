@@ -141,3 +141,21 @@ def generate_candidates(
 
     candidates.sort(key=lambda c: c.confidence, reverse=True)
     return candidates
+
+
+def merge_candidates(*groups: Iterable[Candidate]) -> list[Candidate]:
+    """Concatenate Candidate groups, dedupe by URL, preserve input order.
+
+    The FIRST occurrence of each URL wins (so callers should pass
+    higher-confidence sources first, e.g. scraped links before patterns).
+    Returns a new list; inputs are not mutated.
+    """
+    seen: set[str] = set()
+    out: list[Candidate] = []
+    for group in groups:
+        for c in group:
+            if c.url in seen:
+                continue
+            seen.add(c.url)
+            out.append(c)
+    return out
