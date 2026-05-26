@@ -22,12 +22,13 @@ from typing import Sequence
 
 import httpx
 
-from .candidates import Candidate, generate_candidates
+from .candidates import Candidate, generate_candidates, merge_candidates
 from .knowledge import (
     load_state_patterns,
     record_pattern_outcome,
     reorder_candidates_by_knowledge,
 )
+from .scraper import SCRAPED_PATTERN, extract_fee_links
 
 
 logger = logging.getLogger(__name__)
@@ -131,21 +132,32 @@ async def probe_candidate(
 async def probe_all(
     candidates: Sequence[Candidate],
     concurrency: int = PROBE_CONCURRENCY,
+    client: httpx.AsyncClient | None = None,
 ) -> list[ProbeResult]:
-    """Probe a batch of candidates with bounded concurrency."""
-    semaphore = asyncio.Semaphore(concurrency)
-    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/pdf,*/*"}
+    """Probe a batch of candidates with bounded concurrency.
 
+    If `client` is provided, it is reused (caller manages its lifecycle).
+    Otherwise a transient client is created for this call.
+    """
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _run(c: httpx.AsyncClient) -> list[ProbeResult]:
+        async def _bounded(cand: Candidate) -> ProbeResult:
+            async with semaphore:
+                return await probe_candidate(c, cand)
+
+        return await asyncio.gather(*(_bounded(cand) for cand in candidates))
+
+    if client is not None:
+        return await _run(client)
+
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/pdf,*/*"}
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT_S,
         headers=headers,
         follow_redirects=True,
-    ) as client:
-        async def _bounded(c: Candidate) -> ProbeResult:
-            async with semaphore:
-                return await probe_candidate(client, c)
-
-        return await asyncio.gather(*(_bounded(c) for c in candidates))
+    ) as transient:
+        return await _run(transient)
 
 
 def select_best(probes: Sequence[ProbeResult]) -> ProbeResult | None:
@@ -167,10 +179,12 @@ async def discover_for_institution(
     When state_patterns is provided, candidates are reordered so URLs whose
     pattern has historically succeeded in this state are probed first.
     """
-    candidates = generate_candidates(website_url)
+    pattern_candidates = generate_candidates(website_url)
     if state_patterns:
-        candidates = reorder_candidates_by_knowledge(candidates, state_patterns)
-    if not candidates:
+        pattern_candidates = reorder_candidates_by_knowledge(
+            pattern_candidates, state_patterns
+        )
+    if not pattern_candidates:
         logger.warning("magellan: no candidates for %s (website=%r)", institution_name, website_url)
         return InstitutionFinding(
             institution_id=institution_id,
@@ -178,10 +192,32 @@ async def discover_for_institution(
             best=None,
         )
 
-    logger.info(
-        "magellan: probing %d candidates for %s", len(candidates), institution_name
-    )
-    probes = await probe_all(candidates)
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/pdf,*/*"}
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT_S,
+        headers=headers,
+        follow_redirects=True,
+    ) as client:
+        # Scrape the homepage for fee-related anchors first. Scraper-found
+        # URLs are tried before blind patterns (higher confidence).
+        scraped = await extract_fee_links(client, website_url)
+        if scraped:
+            logger.info(
+                "magellan: scraper found %d fee-related links for %s",
+                len(scraped),
+                institution_name,
+            )
+
+        candidates = merge_candidates(scraped, pattern_candidates)
+
+        logger.info(
+            "magellan: probing %d candidates for %s (%d scraped, %d patterns)",
+            len(candidates),
+            institution_name,
+            len(scraped),
+            len(pattern_candidates),
+        )
+        probes = await probe_all(candidates, client=client)
     best = select_best(probes)
     if best:
         logger.info(
@@ -302,6 +338,11 @@ def _record_finding(conn, run_id: uuid.UUID, finding: InstitutionFinding) -> Non
             best = finding.best
             cand = best.candidate
             if cand.confidence >= URL_UPSERT_THRESHOLD:
+                discovery_method = (
+                    cand.pattern
+                    if cand.pattern == SCRAPED_PATTERN
+                    else f"pattern:{cand.pattern}"
+                )
                 cur.execute(
                     """
                     INSERT INTO institution_urls
@@ -315,7 +356,7 @@ def _record_finding(conn, run_id: uuid.UUID, finding: InstitutionFinding) -> Non
                     (
                         finding.institution_id,
                         cand.url,
-                        f"pattern:{cand.pattern}",
+                        discovery_method,
                         cand.confidence,
                     ),
                 )
