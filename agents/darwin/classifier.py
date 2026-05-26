@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .taxonomy import CANONICAL_CATEGORIES, family_for, is_canonical
@@ -88,6 +88,12 @@ class ExtractionResult:
     raw_response: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # Long-tail fees Claude found but couldn't fit into the 49 canonical
+    # categories. Each entry is a raw dict (fee_name, amount, frequency,
+    # conditions, evidence_quote, suggested_category, confidence). The
+    # agent persists these into fees_verified with fee_category='_unmapped'
+    # so an admin can later promote them to a canonical category.
+    unmapped_fees: list[dict] = field(default_factory=list)
 
 
 # --- Prompt ---------------------------------------------------------------
@@ -334,8 +340,11 @@ EVERY identifiable fee in the document.
 
 Rules:
 - Pick `fee_category` STRICTLY from the canonical whitelist below (49 values).
-  If a fee on the document doesn't fit any of the 49 categories well, OMIT it
-  entirely. DO NOT force-fit or invent categories.
+  If a fee in the document doesn't fit any of the 49 categories, add it to
+  the `unmapped_fees` array (NOT the `fees` array). Include the same fields
+  (fee_name, amount, frequency, conditions, evidence_quote, confidence) plus
+  a `suggested_category` string with your best guess at what we should call
+  it. DO NOT force-fit or invent canonical categories.
 - `fee_name` is the human-readable label as printed in the document.
 - `amount` is the USD amount as a number. If the document gives a range (e.g.
   "$25-$50"), use the headline value. Use null if non-numeric (e.g. "varies").
@@ -363,6 +372,17 @@ Output JSON only. No prose. No markdown fences. Shape:
       "conditions": "Waived with $1500 minimum balance",
       "confidence": 0.92,
       "evidence_quote": "Monthly Service Charge $12.00 (waived..."
+    }
+  ],
+  "unmapped_fees": [
+    {
+      "fee_name": "Crypto Buy Fee",
+      "amount": 1.50,
+      "frequency": "per_transaction",
+      "conditions": null,
+      "confidence": 0.80,
+      "evidence_quote": "Crypto Buy Fee $1.50",
+      "suggested_category": "crypto_transaction"
     }
   ],
   "notes": "..."
@@ -441,6 +461,54 @@ def _coerce_fee_entry(entry: dict[str, Any], raw_response: str) -> Classificatio
         raw_response=raw_response,
         evidence_quote=evidence,
     )
+
+
+def _coerce_unmapped_entry(entry: dict[str, Any]) -> dict:
+    """Normalize one long-tail unmapped fee dict from Claude's response.
+
+    The agent layer persists these as fees_verified rows with fee_category
+    set to the '_unmapped' placeholder. Only normalization happens here;
+    we keep the suggested_category Claude proposed for later promotion.
+    """
+    amount_raw = entry.get("amount")
+    try:
+        amount = float(amount_raw) if amount_raw is not None else None
+    except (TypeError, ValueError):
+        amount = None
+
+    try:
+        confidence = float(entry.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    evidence = entry.get("evidence_quote")
+    if isinstance(evidence, str):
+        evidence = evidence.strip()[:500] or None
+    else:
+        evidence = None
+
+    name = entry.get("fee_name")
+    if isinstance(name, str):
+        name = name.strip()[:200] or None
+    else:
+        name = None
+
+    suggested = entry.get("suggested_category")
+    if isinstance(suggested, str):
+        suggested = suggested.strip()[:80] or None
+    else:
+        suggested = None
+
+    return {
+        "fee_name": name,
+        "amount": amount,
+        "frequency": entry.get("frequency"),
+        "conditions": entry.get("conditions"),
+        "confidence": confidence,
+        "evidence_quote": evidence,
+        "suggested_category": suggested,
+    }
 
 
 def _stub_extract(raw_text: str) -> ExtractionResult:
@@ -525,6 +593,15 @@ def extract_fees(
         if not isinstance(notes, str):
             notes = None
 
+        raw_unmapped = parsed.get("unmapped_fees") or []
+        if not isinstance(raw_unmapped, list):
+            raw_unmapped = []
+        unmapped: list[dict] = []
+        for entry in raw_unmapped:
+            if not isinstance(entry, dict):
+                continue
+            unmapped.append(_coerce_unmapped_entry(entry))
+
         return ExtractionResult(
             fees=fees,
             notes=notes,
@@ -533,6 +610,7 @@ def extract_fees(
             raw_response=raw_response,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            unmapped_fees=unmapped,
         )
     except Exception as exc:  # noqa: BLE001 -- never let one bad doc kill the batch.
         logger.warning("darwin: extract_fees error: %s", exc)

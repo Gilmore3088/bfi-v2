@@ -16,6 +16,7 @@ import {
   Mail,
   History,
   Building2,
+  Tags,
 } from "lucide-react";
 
 type NavItem = {
@@ -23,7 +24,7 @@ type NavItem = {
   label: string;
   icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
   /** Optional id this nav item exposes for badge fetching. */
-  badge?: "review-pending";
+  badge?: "review-pending" | "unmapped";
 };
 
 const GROUPS: { heading: string; items: NavItem[] }[] = [
@@ -45,6 +46,7 @@ const GROUPS: { heading: string; items: NavItem[] }[] = [
       { href: "/admin/states", label: "States", icon: Map },
       { href: "/admin/hamilton", label: "Hamilton", icon: Sparkles },
       { href: "/admin/review", label: "Review", icon: CheckSquare, badge: "review-pending" },
+      { href: "/admin/taxonomy/unmapped", label: "Unmapped", icon: Tags, badge: "unmapped" },
       { href: "/admin/data-quality", label: "Data Quality", icon: ShieldCheck },
     ],
   },
@@ -57,21 +59,30 @@ const GROUPS: { heading: string; items: NavItem[] }[] = [
 export function Sidebar(): React.ReactElement {
   const pathname = usePathname();
   const [reviewPending, setReviewPending] = useState<number | null>(null);
+  const [unmapped, setUnmapped] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
-    async function fetchBadge(): Promise<void> {
+    async function fetchBadges(): Promise<void> {
       try {
-        const r = await fetch("/api/review/pending-count", { cache: "no-store" });
-        if (!r.ok) return;
-        const j = (await r.json()) as { pending?: number };
-        if (alive && typeof j.pending === "number") setReviewPending(j.pending);
+        const [r1, r2] = await Promise.all([
+          fetch("/api/review/pending-count", { cache: "no-store" }),
+          fetch("/api/taxonomy/unmapped-count", { cache: "no-store" }),
+        ]);
+        if (r1.ok) {
+          const j = (await r1.json()) as { pending?: number };
+          if (alive && typeof j.pending === "number") setReviewPending(j.pending);
+        }
+        if (r2.ok) {
+          const j = (await r2.json()) as { unmapped?: number };
+          if (alive && typeof j.unmapped === "number") setUnmapped(j.unmapped);
+        }
       } catch {
         // ignore
       }
     }
-    fetchBadge();
-    const t = setInterval(fetchBadge, 60_000);
+    fetchBadges();
+    const t = setInterval(fetchBadges, 60_000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -109,10 +120,16 @@ export function Sidebar(): React.ReactElement {
                     ? pathname === "/admin"
                     : pathname.startsWith(item.href);
                 const Icon = item.icon;
-                const badge =
-                  item.badge === "review-pending" && reviewPending && reviewPending > 0
-                    ? reviewPending
-                    : null;
+                let badge: number | null = null;
+                if (item.badge === "review-pending" && reviewPending && reviewPending > 0) {
+                  badge = reviewPending;
+                } else if (item.badge === "unmapped" && unmapped && unmapped > 0) {
+                  badge = unmapped;
+                }
+                const badgeTone =
+                  item.badge === "unmapped"
+                    ? "bg-red-500/10 text-red-400 border border-red-500/30"
+                    : "bg-amber-500/10 text-amber-400 border border-amber-500/30";
                 return (
                   <Link
                     key={item.href}
@@ -127,7 +144,7 @@ export function Sidebar(): React.ReactElement {
                     <Icon size={16} strokeWidth={1.75} />
                     <span className="flex-1">{item.label}</span>
                     {badge != null && (
-                      <span className="text-[10px] tabular-nums px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                      <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded ${badgeTone}`}>
                         {badge > 99 ? "99+" : badge}
                       </span>
                     )}

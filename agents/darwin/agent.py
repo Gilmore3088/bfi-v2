@@ -20,6 +20,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import re
+
+from .bounds import check_amount
 from .classifier import (
     AUTO_PROMOTE_CONFIDENCE,
     Classification,
@@ -28,6 +31,39 @@ from .classifier import (
     extract_fees,
 )
 from .taxonomy import family_for, is_canonical
+
+
+_UNMAPPED_CATEGORY = "_unmapped"
+_UNMAPPED_FAMILY = "Unmapped"
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(s: str | None) -> str:
+    """Lower-snake-case slug for unmapped canonical_fee_key disambiguation."""
+    if not s:
+        return "unknown"
+    out = _SLUG_RE.sub("_", s.lower()).strip("_")
+    return out[:60] or "unknown"
+
+
+def _normalize_for_match(s: str) -> str:
+    """Collapse whitespace and lowercase for substring evidence verification."""
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+
+def _verify_evidence(evidence: str | None, raw_text: str) -> bool:
+    """True when evidence_quote appears (whitespace-insensitive) in raw_text.
+
+    Returns False when either side is missing. The agent forces review_status
+    to 'pending' on a False result even if Claude's confidence is high.
+    """
+    if not evidence or not raw_text:
+        return False
+    needle = _normalize_for_match(evidence)
+    haystack = _normalize_for_match(raw_text)
+    if not needle:
+        return False
+    return needle in haystack
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +185,9 @@ def _insert_verified(
     institution_id: int,
     classification: Classification,
     review_status: str,
+    evidence_in_source: bool,
+    amount_in_bounds: bool,
+    amount_bound_reason: str | None,
 ) -> int:
     """Insert a fees_verified row. Returns the new row id."""
     with conn.cursor() as cur:
@@ -166,8 +205,12 @@ def _insert_verified(
                 confidence,
                 canonical_fee_key,
                 variant_type,
-                review_status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                review_status,
+                evidence_quote,
+                evidence_in_source,
+                amount_in_bounds,
+                amount_bound_reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -183,9 +226,110 @@ def _insert_verified(
                 classification.fee_category,  # canonical_fee_key == category for canonical set
                 None,  # variant_type populated by Knox / future enrichment.
                 review_status,
+                classification.evidence_quote,
+                evidence_in_source,
+                amount_in_bounds,
+                amount_bound_reason,
             ),
         )
         return cur.fetchone()[0]
+
+
+def _insert_unmapped(
+    conn,
+    *,
+    fees_raw_id: int,
+    institution_id: int,
+    entry: dict,
+    raw_text: str,
+) -> int:
+    """Insert a long-tail unmapped fee as a fees_verified row.
+
+    fee_category is '_unmapped' (FK placeholder); canonical_fee_key is
+    '_unmapped:<slug>' so multiple unmapped fees per institution don't
+    collide on the partial unique index. Always review_status='flagged'.
+    """
+    fee_name = entry.get("fee_name")
+    amount = entry.get("amount")
+    confidence = entry.get("confidence") or 0.0
+    evidence = entry.get("evidence_quote")
+    canonical_key = f"_unmapped:{_slugify(fee_name)}"
+    evidence_ok = _verify_evidence(evidence, raw_text)
+    in_bounds, bound_reason = check_amount(_UNMAPPED_CATEGORY, amount)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fees_verified (
+                fees_raw_id,
+                institution_id,
+                fee_category,
+                fee_family,
+                fee_name,
+                amount,
+                frequency,
+                conditions,
+                confidence,
+                canonical_fee_key,
+                variant_type,
+                review_status,
+                evidence_quote,
+                evidence_in_source,
+                amount_in_bounds,
+                amount_bound_reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                fees_raw_id,
+                institution_id,
+                _UNMAPPED_CATEGORY,
+                _UNMAPPED_FAMILY,
+                fee_name,
+                amount,
+                entry.get("frequency"),
+                entry.get("conditions"),
+                round(float(confidence), 3),
+                canonical_key,
+                None,
+                "flagged",
+                evidence,
+                evidence_ok,
+                in_bounds,
+                bound_reason,
+            ),
+        )
+        return cur.fetchone()[0]
+
+
+def _find_other_doc_live_rows(
+    conn,
+    *,
+    institution_id: int,
+    canonical_fee_key: str,
+    exclude_fees_raw_id: int,
+) -> list[dict]:
+    """Cross-doc dedup helper.
+
+    Find live (non-superseded) fees_verified rows for the same
+    (institution, canonical key) that originated from a DIFFERENT fees_raw
+    document than the one we're currently processing. Returns list of
+    {id, amount, confidence, created_at}.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, amount, confidence, created_at
+            FROM fees_verified
+            WHERE institution_id = %s
+              AND canonical_fee_key = %s
+              AND superseded_by IS NULL
+              AND fees_raw_id <> %s
+            """,
+            (institution_id, canonical_fee_key, exclude_fees_raw_id),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def _supersede(conn, *, old_id: int, new_id: int) -> None:
@@ -342,7 +486,18 @@ def _process_row(
             deduped[fee.fee_category] = fee
 
     for fee in deduped.values():
+        # Evidence verification: is the quote actually present in raw_text?
+        evidence_ok = _verify_evidence(fee.evidence_quote, raw_text)
+        # Amount sanity bounds per category.
+        in_bounds, bound_reason = check_amount(fee.fee_category, fee.amount)
+
+        # Start from Claude's confidence-based decision, then downgrade to
+        # 'pending' if either guardrail trips. We never UPGRADE on the basis
+        # of the guards -- they are veto-only.
         review_status = "auto_approved" if fee.auto_promote else "pending"
+        if review_status == "auto_approved" and (not evidence_ok or not in_bounds):
+            review_status = "pending"
+
         canonical_key = fee.fee_category
         live = _find_live_row(
             conn,
@@ -355,12 +510,36 @@ def _process_row(
             institution_id=institution_id,
             classification=fee,
             review_status=review_status,
+            evidence_in_source=evidence_ok,
+            amount_in_bounds=in_bounds,
+            amount_bound_reason=bound_reason,
         )
         superseded_id: int | None = None
         if live and _amounts_differ(live["amount"], fee.amount):
             _supersede(conn, old_id=live["id"], new_id=new_id)
             superseded_id = live["id"]
             superseded_count += 1
+
+        # Cross-doc dedup. If other live rows exist for the same
+        # (institution, canonical key) from a DIFFERENT fees_raw document,
+        # the higher-confidence row wins; supersede the loser(s).
+        competitors = _find_other_doc_live_rows(
+            conn,
+            institution_id=institution_id,
+            canonical_fee_key=canonical_key,
+            exclude_fees_raw_id=fees_raw_id,
+        )
+        for comp in competitors:
+            comp_conf = float(comp.get("confidence") or 0.0)
+            if fee.confidence >= comp_conf:
+                # New row wins; supersede the older competitor.
+                _supersede(conn, old_id=comp["id"], new_id=new_id)
+                superseded_count += 1
+            else:
+                # Existing competitor wins; supersede THIS new row instead.
+                _supersede(conn, old_id=new_id, new_id=comp["id"])
+                superseded_count += 1
+                break  # one winner is enough
 
         if review_status == "auto_approved":
             auto_count += 1
@@ -382,11 +561,51 @@ def _process_row(
                 "review_status": review_status,
                 "superseded_id": superseded_id,
                 "evidence_quote": fee.evidence_quote,
+                "evidence_in_source": evidence_ok,
+                "amount_in_bounds": in_bounds,
+                "amount_bound_reason": bound_reason,
                 "stub_extractor": result.stub,
             },
         )
         last_id = new_id
         last_classification = fee
+
+    # Persist long-tail unmapped fees so admins can later categorize them.
+    unmapped_persisted = 0
+    for entry in result.unmapped_fees:
+        amount = entry.get("amount")
+        if amount is None or float(amount) <= 0:
+            # Same noise-filter rule as canonical fees: skip null/zero.
+            continue
+        try:
+            new_id = _insert_unmapped(
+                conn,
+                fees_raw_id=fees_raw_id,
+                institution_id=institution_id,
+                entry=entry,
+                raw_text=raw_text,
+            )
+        except Exception as exc:  # noqa: BLE001 -- one bad entry shouldn't kill the doc
+            logger.warning("darwin: skipped unmapped entry: %s", exc)
+            continue
+        unmapped_persisted += 1
+        _emit_event(
+            conn,
+            run_id=run_id,
+            status="succeeded",
+            payload={
+                "fees_raw_id": fees_raw_id,
+                "fees_verified_id": new_id,
+                "institution_id": institution_id,
+                "fee_category": _UNMAPPED_CATEGORY,
+                "fee_name": entry.get("fee_name"),
+                "amount": amount,
+                "confidence": entry.get("confidence"),
+                "review_status": "flagged",
+                "suggested_category": entry.get("suggested_category"),
+                "kind": "unmapped",
+            },
+        )
 
     conn.commit()
 
